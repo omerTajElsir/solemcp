@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>SoleMCP</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="sidebar-brand">
+          <div class="app-icon" aria-hidden="true">S</div>
+          <div class="sidebar-brand-text">
+            <div class="sidebar-title">SoleMCP</div>
+            <div class="sidebar-subtitle">On this Mac</div>
+          </div>
+        </div>
+        <nav class="sidebar-nav" role="tablist" aria-label="Sections">
+          <button type="button" data-tab="home" class="active" aria-selected="true">
+            <span class="nav-label">Setup</span>
+            <span id="nav-badge-home" class="nav-badge hidden"></span>
+          </button>
+          <button type="button" data-tab="apps" aria-selected="false">
+            <span class="nav-label">Apps</span>
+          </button>
+          <button type="button" data-tab="tools" aria-selected="false">
+            <span class="nav-label">Tools</span>
+            <span id="nav-badge-tools" class="nav-badge hidden"></span>
+          </button>
+          <button type="button" data-tab="projects" aria-selected="false">
+            <span class="nav-label">Projects</span>
+          </button>
+          <button type="button" data-tab="status" aria-selected="false">
+            <span class="nav-label">Status</span>
+            <span id="nav-badge-status" class="nav-badge warn hidden"></span>
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <div id="status-pill" class="status-chip">Connecting…</div>
+        </div>
+      </aside>
+
+      <div class="content">
+        <header class="content-header">
+          <div class="content-header-text">
+            <h1 id="page-title">Setup</h1>
+            <p class="content-subtitle" id="page-lede">Finish these steps to get SoleMCP working.</p>
+          </div>
+          <div id="page-actions" class="content-actions"></div>
+        </header>
+
+        <main class="content-main">
+          <section id="panel-home" class="panel active" aria-label="Setup"></section>
+          <section id="panel-apps" class="panel" hidden aria-label="Apps"></section>
+          <section id="panel-tools" class="panel" hidden aria-label="Tools"></section>
+          <section id="panel-projects" class="panel" hidden aria-label="Projects"></section>
+          <section id="panel-status" class="panel" hidden aria-label="Status"></section>
+        </main>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <dialog id="add-dialog" class="sheet">
+      <form method="dialog" id="add-form">
+        <header class="sheet-header">
+          <h2>Add custom tool</h2>
+          <p>Most people should use ready-made tools instead.</p>
+        </header>
+        <label class="field">Short name
+          <input name="slug" required pattern="[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?" placeholder="my-tool" />
+        </label>
+        <label class="field">How it runs
+          <select name="transport">
+            <option value="stdio">Local program on this Mac</option>
+            <option value="http">Online service (URL)</option>
+          </select>
+        </label>
+        <label class="field stdio-only">Command
+          <input name="argv" placeholder="npx -y some-package" />
+        </label>
+        <label class="field http-only hidden">Service address
+          <input name="url" placeholder="https://example.com/mcp" />
+        </label>
+        <menu class="sheet-actions">
+          <button value="cancel" type="submit" formnovalidate class="btn">Cancel</button>
+          <button value="ok" type="submit" class="btn primary">Add for review</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="adopt-dialog" class="sheet">
+      <form method="dialog" id="adopt-form">
+        <header class="sheet-header">
+          <h2>Link a project folder</h2>
+          <p>Choose the folder your coding app has open.</p>
+        </header>
+        <label class="field">Folder path
+          <input name="path" required placeholder="/Users/you/Documents/my-app" />
+        </label>
+        <menu class="sheet-actions">
+          <button value="cancel" type="submit" formnovalidate class="btn">Cancel</button>
+          <button value="ok" type="submit" class="btn primary">Link folder</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="catalog-dialog" class="sheet">
+      <form method="dialog" id="catalog-form">
+        <header class="sheet-header">
+          <h2 id="catalog-title">Add tool</h2>
+          <p id="catalog-summary"></p>
+        </header>
+        <input type="hidden" name="id" />
+        <div id="catalog-fields"></div>
+        <menu class="sheet-actions">
+          <button value="cancel" type="submit" formnovalidate class="btn">Cancel</button>
+          <button value="ok" type="submit" class="btn primary">Continue</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

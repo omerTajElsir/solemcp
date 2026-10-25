@@ -1,0 +1,19 @@
+{
+  "name": "@solemcp/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "solemcp": "./src/bin.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@solemcp/bridge": "workspace:*",
+    "@solemcp/core": "workspace:*",
+    "@solemcp/daemon": "workspace:*",
+    "@solemcp/ipc": "workspace:*",
+    "@solemcp/schema": "workspace:*"
+  }
+}

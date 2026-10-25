@@ -1,0 +1,27 @@
+{
+  "name": "solemcp",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "solemcp": "./dist/solemcp.mjs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "solemcp": "node dist/solemcp.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
+  }
+}

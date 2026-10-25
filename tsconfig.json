@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@solemcp/ipc": ["./packages/ipc/src/index.ts"],
+      "@solemcp/schema": ["./packages/schema/src/index.ts"],
+      "@solemcp/core": ["./packages/core/src/index.ts"],
+      "@solemcp/daemon": ["./packages/daemon/src/index.ts"],
+      "@solemcp/bridge": ["./packages/bridge/src/index.ts"],
+      "@solemcp/cli": ["./packages/cli/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "vitest.config.ts"]
+}

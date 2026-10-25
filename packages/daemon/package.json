@@ -1,0 +1,15 @@
+{
+  "name": "@solemcp/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@solemcp/core": "workspace:*",
+    "@solemcp/ipc": "workspace:*",
+    "@solemcp/schema": "workspace:*"
+  }
+}

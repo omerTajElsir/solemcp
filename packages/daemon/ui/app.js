@@ -1,0 +1,986 @@
+const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token");
+const pill = document.getElementById("status-pill");
+
+const PAGE = {
+  home: {
+    title: "Setup",
+    lede: "Finish these steps to get SoleMCP working with your coding apps.",
+  },
+  apps: {
+    title: "Apps",
+    lede: "Connect Cursor, Claude Code, or Codex so they can use tools you allow.",
+  },
+  tools: {
+    title: "Tools",
+    lede: "Add services like GitHub or Notion. New tools wait for your approval.",
+  },
+  projects: {
+    title: "Projects",
+    lede: "Link folders you work in, then turn tools on for each one.",
+  },
+  status: {
+    title: "Status",
+    lede: "Health of SoleMCP on this Mac, plus recent changes.",
+  },
+};
+
+/** @type {{ tab: string, fingerprint: string }} */
+const uiState = { tab: "home", fingerprint: "" };
+
+function setPage(tab) {
+  const meta = PAGE[tab] ?? PAGE.home;
+  document.getElementById("page-title").textContent = meta.title;
+  document.getElementById("page-lede").textContent = meta.lede;
+  document.getElementById("page-actions").replaceChildren();
+  document.querySelector(".content")?.classList.toggle("content-wide", tab === "tools");
+}
+
+function toast(message, kind = "ok") {
+  const node = document.getElementById("toast");
+  node.textContent = message;
+  node.className = `toast ${kind}`;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => node.classList.add("hidden"), 2800);
+}
+
+async function api(path, options = {}) {
+  if (!token) throw new Error("Open this page from Terminal with solemcp ui.");
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...(options.headers ?? {}),
+    },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  return body;
+}
+
+function el(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  return t.content.firstElementChild;
+}
+
+function esc(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function projectLabel(p) {
+  if (p.originUrl) return p.originUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+  const path = p.paths?.[0];
+  if (path) {
+    const parts = path.split("/").filter(Boolean);
+    return parts[parts.length - 1] || path;
+  }
+  return p.id;
+}
+
+function transportLabel(c) {
+  return c.transport === "http" ? "Online service" : "Local program";
+}
+
+function connectionLabel(status) {
+  if (!status || status === "—") return "Not checked yet";
+  if (status === "running" || status === "ok" || status === "connected") return "Ready";
+  if (status === "stopped" || status === "idle") return "Idle";
+  if (String(status).includes("fail")) return "Couldn’t start";
+  return String(status);
+}
+
+/** Map raw doctor / activity strings to plain language. */
+function humanIssue(raw) {
+  const s = String(raw);
+  const m = s.match(/^connector\s+(\S+):\s*upstream marked failed/i);
+  if (m) return `${m[1]} couldn’t start. Open Tools, confirm it’s allowed, then try again.`;
+  if (/quarantine|pending/i.test(s)) return s.replace(/quarantine/gi, "approval");
+  return s
+    .replace(/\bconnector\b/gi, "tool")
+    .replace(/\bupstream\b/gi, "connection")
+    .replace(/\bdaemon\b/gi, "SoleMCP");
+}
+
+function humanActivity(raw) {
+  return String(raw)
+    .replace(/\bUI listening on\b/i, "Control window opened on")
+    .replace(/\bquarantined\b/gi, "waiting for approval")
+    .replace(/\bconnector\b/gi, "tool")
+    .replace(/\bcatalog:\s*/gi, "")
+    .replace(/\bPAT\b/g, "access token");
+}
+
+function fingerprint(data) {
+  return JSON.stringify(data);
+}
+
+function goTab(name) {
+  uiState.tab = name;
+  document.querySelectorAll(".sidebar-nav button").forEach((b) => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll(".panel").forEach((p) => {
+    const on = p.id === `panel-${name}`;
+    p.classList.toggle("active", on);
+    p.toggleAttribute("hidden", !on);
+  });
+  setPage(name);
+  // Re-apply page actions for the active tab from last payload if present
+  if (goTab._last) applyPageActions(name, goTab._last);
+}
+
+function setBadge(id, text, warn = false) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  if (!text) {
+    node.classList.add("hidden");
+    node.textContent = "";
+    return;
+  }
+  node.textContent = text;
+  node.classList.toggle("hidden", false);
+  node.classList.toggle("warn", warn);
+}
+
+function applyPageActions(tab, data) {
+  const actions = document.getElementById("page-actions");
+  actions.replaceChildren();
+  if (tab === "projects") {
+    const btn = el(`<button type="button" class="btn primary">Link folder…</button>`);
+    btn.addEventListener("click", () => document.getElementById("adopt-dialog").showModal());
+    actions.append(btn);
+  }
+  if (tab === "tools") {
+    const btn = el(`<button type="button" class="btn">Custom tool…</button>`);
+    btn.addEventListener("click", () => document.getElementById("add-dialog").showModal());
+    actions.append(btn);
+  }
+  void data;
+}
+
+function setupProgress(clients, connectors, projects) {
+  const clientList = clients.clients ?? [];
+  const toolList = connectors.connectors ?? [];
+  const projectList = projects.projects ?? [];
+  const anyApp = clientList.some((c) => c.installed && !c.blocked);
+  const pending = toolList.filter((c) => c.quarantine?.state !== "approved");
+  const anyApproved = toolList.some((c) => c.quarantine?.state === "approved");
+  const linked = projectList.filter((p) => p.adopted).length;
+  const anyAssigned = projectList.some((p) => (p.assignments ?? []).length > 0);
+
+  const steps = [
+    {
+      id: "apps",
+      done: anyApp,
+      title: "Connect a coding app",
+      body: anyApp
+        ? "At least one app is connected."
+        : "Connect Cursor, Claude Code, or Codex.",
+      cta: "Connect an app",
+      tab: "apps",
+    },
+    {
+      id: "tools",
+      done: anyApproved,
+      title: "Add and allow a tool",
+      body:
+        pending.length > 0
+          ? `${pending.length} tool${pending.length === 1 ? "" : "s"} waiting for your approval.`
+          : anyApproved
+            ? "You have at least one allowed tool."
+            : "Add GitHub, Notion, or another tool, then allow it.",
+      cta: pending.length > 0 ? "Review approvals" : "Browse tools",
+      tab: "tools",
+    },
+    {
+      id: "projects",
+      done: linked > 0 && anyAssigned,
+      title: "Link a project and enable tools",
+      body:
+        linked === 0
+          ? "Link a folder, then enable tools for it."
+          : anyAssigned
+            ? "Tools are enabled on at least one project."
+            : "Enable an allowed tool on your linked project.",
+      cta: "Open projects",
+      tab: "projects",
+    },
+  ];
+
+  const next = steps.find((s) => !s.done) ?? null;
+  const remaining = steps.filter((s) => !s.done).length;
+  return { steps, next, remaining, pendingCount: pending.length, anyAssigned, linked };
+}
+
+async function refresh({ force = false } = {}) {
+  const [status, projects, connectors, doctor, activity, clients, catalog] = await Promise.all([
+    api("/api/status"),
+    api("/api/projects"),
+    api("/api/connectors"),
+    api("/api/doctor"),
+    api("/api/activity"),
+    api("/api/clients"),
+    api("/api/catalog"),
+  ]);
+
+  const payload = { status, projects, connectors, doctor, activity, clients, catalog };
+  const fp = fingerprint({
+    projects: projects.projects,
+    connectors: connectors.connectors,
+    doctor,
+    activity: activity.events,
+    clients: clients.clients,
+    catalog: catalog.entries,
+    status: status.version,
+  });
+
+  const list = connectors.connectors ?? [];
+  const pending = list.filter((c) => c.quarantine?.state !== "approved").length;
+  const progress = setupProgress(clients, connectors, projects);
+
+  if (!doctor.ok) {
+    const n = doctor.issues?.length ?? 1;
+    pill.textContent = n === 1 ? "1 issue — see Status" : `${n} issues — see Status`;
+    pill.className = "status-chip warn";
+  } else if (pending > 0) {
+    pill.textContent = `${pending} waiting for approval`;
+    pill.className = "status-chip warn";
+  } else {
+    pill.textContent = `Running · ${list.length} tool${list.length === 1 ? "" : "s"}`;
+    pill.className = "status-chip ok";
+  }
+
+  setBadge("nav-badge-home", progress.remaining > 0 ? String(progress.remaining) : "");
+  setBadge("nav-badge-tools", pending > 0 ? String(pending) : "", true);
+  setBadge("nav-badge-status", doctor.ok ? "" : "!", true);
+
+  if (!force && fp === uiState.fingerprint) return;
+  uiState.fingerprint = fp;
+  goTab._last = payload;
+
+  renderHome(payload, progress);
+  renderApps(clients);
+  renderTools(list, catalog.entries ?? []);
+  renderProjects(projects.projects ?? [], list);
+  renderStatus(doctor, activity.events ?? [], status);
+  applyPageActions(uiState.tab, payload);
+}
+
+function renderHome(payload, progress) {
+  const panel = document.getElementById("panel-home");
+  panel.replaceChildren();
+
+  const { steps, next, remaining } = progress;
+  const doctor = payload.doctor;
+
+  const dots = el(`<div class="progress" aria-hidden="true"></div>`);
+  for (const s of steps) {
+    const cls = s.done ? "done" : next?.id === s.id ? "current" : "";
+    dots.append(el(`<div class="progress-dot ${cls}"></div>`));
+  }
+  panel.append(dots);
+
+  if (next) {
+    const focus = el(`<div class="focus-card">
+      <p class="focus-kicker">Next step · ${esc(String(steps.indexOf(next) + 1))} of ${esc(String(steps.length))}</p>
+      <h2>${esc(next.title)}</h2>
+      <p>${esc(next.body)}</p>
+      <button type="button" class="btn primary">${esc(next.cta)}</button>
+    </div>`);
+    focus.querySelector("button").addEventListener("click", () => goTab(next.tab));
+    panel.append(focus);
+  } else {
+    panel.append(
+      el(`<div class="focus-card">
+        <p class="focus-kicker">You’re set up</p>
+        <h2>SoleMCP is ready</h2>
+        <p>Manage tools and projects anytime. Open Status if something looks wrong.</p>
+        <button type="button" class="btn primary" data-go="tools">Browse tools</button>
+      </div>`),
+    );
+    panel.querySelector("[data-go]").addEventListener("click", () => goTab("tools"));
+  }
+
+  const done = steps.filter((s) => s.done);
+  if (done.length) {
+    const group = el(`<div class="group">
+      <div class="group-title">Completed</div>
+      <div class="inset done-list"></div>
+    </div>`);
+    const inset = group.querySelector(".inset");
+    for (const s of done) {
+      inset.append(
+        el(`<div class="row">
+          <div class="row-main">
+            <div class="row-title">${esc(s.title)}</div>
+            <div class="row-subtitle">${esc(s.body)}</div>
+          </div>
+          <div class="row-trailing"><span class="pill ok">Done</span></div>
+        </div>`),
+      );
+    }
+    panel.append(group);
+  }
+
+  if (!doctor.ok) {
+    const first = humanIssue(doctor.issues?.[0] ?? "Something needs attention");
+    const callout = el(`<div class="callout">
+      <div>
+        <h3>Needs attention</h3>
+        <p>${esc(first)}</p>
+      </div>
+      <button type="button" class="btn plain">View Status</button>
+    </div>`);
+    callout.querySelector("button").addEventListener("click", () => goTab("status"));
+    panel.append(callout);
+  }
+
+  if (remaining === 0) {
+    panel.append(
+      el(`<p class="group-footer">Tip: after connecting a new tool, allow it under Tools, then enable it on a project.</p>`),
+    );
+  }
+}
+
+function renderApps(guide) {
+  const panel = document.getElementById("panel-apps");
+  panel.replaceChildren();
+
+  panel.append(
+    el(`<div class="group">
+      <div class="group-title">Before you start</div>
+      <div class="inset">
+        <div class="row stack">
+          <div class="row-main">
+            <div class="row-title">How connecting works</div>
+            <div class="row-subtitle">${esc(guide.note ?? "Your coding apps talk to SoleMCP on this Mac.")}</div>
+            <ol style="margin:8px 0 0;padding-left:1.15rem;color:var(--secondary);font-size:12px;line-height:1.45">
+              ${(guide.afterInstall ?? []).map((s) => `<li>${esc(s)}</li>`).join("")}
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>`),
+  );
+
+  const group = el(`<div class="group">
+    <div class="group-title">Coding apps</div>
+    <div class="inset" data-apps></div>
+  </div>`);
+  const inset = group.querySelector("[data-apps]");
+
+  for (const c of guide.clients ?? []) {
+    let pillHtml;
+    if (c.blocked) pillHtml = `<span class="pill warn">Needs fix</span>`;
+    else if (c.installed) pillHtml = `<span class="pill ok">Connected</span>`;
+    else pillHtml = `<span class="pill">Not connected</span>`;
+
+    const row = el(`<div class="row stack">
+      <div class="row-main">
+        <div class="row-title" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${esc(c.title)} ${pillHtml}</div>
+        <div class="row-subtitle">${esc(c.summary)}${c.blocked ? ` — ${esc(c.blocked)}` : ""}</div>
+      </div>
+      <div class="row-trailing" data-actions></div>
+      <details class="more">
+        <summary>More options</summary>
+        <div class="row-subtitle" style="margin-top:8px">Settings: <code>${esc(c.configPath)}</code></div>
+        <div data-more style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
+        <pre class="snippet">${esc(c.snippet)}</pre>
+      </details>
+    </div>`);
+
+    const actions = row.querySelector("[data-actions]");
+    const more = row.querySelector("[data-more]");
+
+    const primary = el(`<button type="button" class="btn primary">${esc(
+      c.installed ? "Reconnect" : c.oneClickUrl ? "Connect" : c.installLabel || "Connect",
+    )}</button>`);
+
+    primary.addEventListener("click", async () => {
+      if (c.oneClickUrl && !c.installed) {
+        location.href = c.oneClickUrl;
+        return;
+      }
+      primary.disabled = true;
+      try {
+        const res = await api("/api/clients/install", {
+          method: "POST",
+          body: JSON.stringify({ client: c.id }),
+        });
+        const result = res.result ?? {};
+        toast(result.wrote ? `Connected ${c.title}` : result.reason ?? "Already connected");
+        await refresh({ force: true });
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), "bad");
+        primary.disabled = false;
+      }
+    });
+    actions.append(primary);
+
+    if (c.oneClickWebUrl) {
+      more.append(
+        el(`<a class="btn" href="${esc(c.oneClickWebUrl)}" target="_blank" rel="noreferrer">Web install link</a>`),
+      );
+    }
+    if (c.oneClickUrl) {
+      const write = el(`<button type="button" class="btn">Write settings file</button>`);
+      write.addEventListener("click", async () => {
+        write.disabled = true;
+        try {
+          const res = await api("/api/clients/install", {
+            method: "POST",
+            body: JSON.stringify({ client: c.id }),
+          });
+          toast(res.result?.wrote ? "Settings updated" : res.result?.reason ?? "No change");
+          await refresh({ force: true });
+        } catch (err) {
+          toast(err instanceof Error ? err.message : String(err), "bad");
+          write.disabled = false;
+        }
+      });
+      more.append(write);
+    }
+    const copy = el(`<button type="button" class="btn">Copy install command</button>`);
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(c.cliCommand);
+        toast("Copied");
+      } catch {
+        toast(c.cliCommand);
+      }
+    });
+    more.append(copy);
+
+    inset.append(row);
+  }
+  panel.append(group);
+}
+
+function renderProjects(projects, connectors) {
+  const panel = document.getElementById("panel-projects");
+  panel.replaceChildren();
+
+  if (!projects.length) {
+    panel.append(
+      el(`<div class="inset empty">
+        <h3>No projects yet</h3>
+        <p>Link the folder your coding app has open, then enable tools for it.</p>
+        <div style="margin-top:12px"><button type="button" class="btn primary" id="empty-adopt">Link folder…</button></div>
+      </div>`),
+    );
+    panel.querySelector("#empty-adopt").addEventListener("click", () => {
+      document.getElementById("adopt-dialog").showModal();
+    });
+    return;
+  }
+
+  const group = el(`<div class="group">
+    <div class="group-title">Linked folders</div>
+    <div class="inset" data-list></div>
+  </div>`);
+  const inset = group.querySelector("[data-list]");
+  const approved = connectors.filter((x) => x.quarantine?.state === "approved");
+
+  for (const p of projects) {
+    const enabled = (p.assignments ?? [])
+      .map((a) => connectors.find((c) => c.id === a.connectorId)?.slug ?? a.connectorId)
+      .filter(Boolean);
+    const paths = (p.paths ?? []).join(", ") || "—";
+    const row = el(`<div class="row stack">
+      <div class="row-main">
+        <div class="row-title" style="display:flex;gap:8px;align-items:center">${esc(projectLabel(p))}
+          <span class="pill ${p.adopted ? "ok" : ""}">${p.adopted ? "Linked" : "Not linked"}</span>
+        </div>
+        <div class="row-subtitle"><code>${esc(paths)}</code></div>
+        <div class="row-subtitle" style="margin-top:4px">Tools on: ${esc(enabled.join(", ") || "None yet")}</div>
+      </div>
+      <div class="row-trailing" data-assign></div>
+    </div>`);
+    const trail = row.querySelector("[data-assign]");
+    if (!approved.length) {
+      trail.append(el(`<span class="row-subtitle">Allow a tool first</span>`));
+    }
+    for (const c of approved) {
+      const already = (p.assignments ?? []).some((a) => a.connectorId === c.id);
+      if (already) {
+        trail.append(el(`<span class="pill ok">${esc(c.slug)}</span>`));
+        continue;
+      }
+      const btn = el(`<button type="button" class="btn">Enable ${esc(c.slug)}</button>`);
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await api("/api/assign", {
+            method: "POST",
+            body: JSON.stringify({ slug: c.slug, projectId: p.id }),
+          });
+          toast(`${c.slug} enabled`);
+          await refresh({ force: true });
+        } catch (err) {
+          toast(err instanceof Error ? err.message : String(err), "bad");
+          btn.disabled = false;
+        }
+      });
+      trail.append(btn);
+    }
+    inset.append(row);
+  }
+  panel.append(group);
+}
+
+async function startOAuthCatalogInstall(entry) {
+  const res = await api("/api/catalog/install", {
+    method: "POST",
+    body: JSON.stringify({ id: entry.id }),
+  });
+  const result = res.result ?? {};
+  if (result.status === "complete") {
+    toast(`${entry.title} added — allow it when ready`);
+    goTab("tools");
+    await refresh({ force: true });
+    return;
+  }
+  if (!result.authorizeUrl || !result.sessionId) {
+    throw new Error(result.error ?? "Sign-in did not start.");
+  }
+  window.open(result.authorizeUrl, "_blank", "noopener,noreferrer");
+  toast(`Finish signing in to ${entry.title}…`);
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const status = await api(`/api/catalog/oauth/${encodeURIComponent(result.sessionId)}`);
+    if (status.status === "complete") {
+      toast(`${entry.title} connected — allow it when ready`);
+      goTab("tools");
+      await refresh({ force: true });
+      return;
+    }
+    if (status.status === "error") throw new Error(status.error ?? "Sign-in failed");
+  }
+  throw new Error("Timed out waiting for browser sign-in");
+}
+
+async function startGithubCatalogInstall(entry) {
+  const res = await api("/api/catalog/install", {
+    method: "POST",
+    body: JSON.stringify({ id: entry.id, action: "connect" }),
+  });
+  const result = res.result ?? {};
+  if (result.status === "complete") {
+    toast("GitHub added — allow it when ready");
+    goTab("tools");
+    await refresh({ force: true });
+    return;
+  }
+  if (result.status !== "needs_auth") {
+    throw new Error(result.message ?? result.error ?? "Could not connect GitHub");
+  }
+  openGithubAuthDialog(entry, result);
+}
+
+function openGithubAuthDialog(entry, needs) {
+  const form = document.getElementById("catalog-form");
+  form.elements.namedItem("id").value = entry.id;
+  document.getElementById("catalog-title").textContent = "Connect GitHub";
+  document.getElementById("catalog-summary").textContent =
+    needs.message ?? "Sign in with GitHub on this Mac, or paste an access token.";
+  const fields = document.getElementById("catalog-fields");
+  fields.replaceChildren();
+
+  if (needs.ghInstalled) {
+    const ghBtn = el(`<button type="button" class="btn primary">Sign in with GitHub</button>`);
+    ghBtn.addEventListener("click", async () => {
+      ghBtn.disabled = true;
+      ghBtn.textContent = "Waiting for browser…";
+      try {
+        const res = await api("/api/catalog/install", {
+          method: "POST",
+          body: JSON.stringify({ id: entry.id, action: "gh-login" }),
+        });
+        const result = res.result ?? {};
+        if (result.status === "complete") {
+          document.getElementById("catalog-dialog").close();
+          toast("GitHub connected — allow it when ready");
+          goTab("tools");
+          await refresh({ force: true });
+          return;
+        }
+        throw new Error(result.message ?? "GitHub sign-in did not finish");
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), "bad");
+        ghBtn.disabled = false;
+        ghBtn.textContent = "Sign in with GitHub";
+      }
+    });
+    fields.append(ghBtn);
+    fields.append(
+      el(`<p class="group-footer" style="margin:8px 0 12px">Opens GitHub in your browser, then saves the login in your keychain.</p>`),
+    );
+  } else {
+    fields.append(
+      el(`<p class="group-footer" style="margin-bottom:12px">For one-click sign-in, install GitHub’s command-line tool: <code>brew install gh</code></p>`),
+    );
+  }
+
+  fields.append(
+    el(`<p class="group-footer" style="margin-bottom:8px">Or <a href="${esc(needs.createUrl ?? "https://github.com/settings/tokens")}" target="_blank" rel="noreferrer">create an access token</a> and paste it below.</p>`),
+  );
+  fields.append(
+    el(`<label class="field">GitHub access token
+      <input name="secret:GITHUB_OAUTH_TOKEN" type="password" autocomplete="off" placeholder="ghp_… or github_pat_…" />
+    </label>`),
+  );
+
+  document.getElementById("catalog-dialog").showModal();
+}
+
+function openCatalogDialog(entry) {
+  if (entry.authMode === "oauth") {
+    startOAuthCatalogInstall(entry).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
+    return;
+  }
+  if (entry.authMode === "github") {
+    startGithubCatalogInstall(entry).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
+    return;
+  }
+  if (entry.authMode === "none" && !entry.needsPath) {
+    api("/api/catalog/install", { method: "POST", body: JSON.stringify({ id: entry.id }) })
+      .then(async () => {
+        toast(`${entry.title} added — allow it when ready`);
+        await refresh({ force: true });
+      })
+      .catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
+    return;
+  }
+
+  const form = document.getElementById("catalog-form");
+  form.elements.namedItem("id").value = entry.id;
+  document.getElementById("catalog-title").textContent = `Add ${entry.title}`;
+  document.getElementById("catalog-summary").textContent = entry.summary;
+  const fields = document.getElementById("catalog-fields");
+  fields.replaceChildren();
+
+  if (entry.needsPath) {
+    fields.append(
+      el(`<label class="field">${esc(entry.pathLabel ?? "Folder")}
+        <input name="path" required placeholder="${esc(entry.pathPlaceholder ?? "")}" />
+      </label>`),
+    );
+  }
+  for (const s of entry.secrets ?? []) {
+    const hint = s.present
+      ? "Already saved — leave blank to keep it, or paste a new value."
+      : s.help;
+    fields.append(
+      el(`<label class="field">${esc(s.label)}
+        <input name="secret:${esc(s.ref)}" type="password" autocomplete="off" ${s.present ? "" : "required"} placeholder="${s.present ? "(saved)" : ""}" />
+        <span class="group-footer">${esc(hint)}</span>
+      </label>`),
+    );
+  }
+  if (!entry.needsPath && !(entry.secrets ?? []).length) {
+    fields.append(el(`<p class="group-footer">No sign-in needed. You’ll still need to allow this tool before it can run.</p>`));
+  }
+  document.getElementById("catalog-dialog").showModal();
+}
+
+function renderTools(connectors, catalogEntries = []) {
+  const panel = document.getElementById("panel-tools");
+  panel.replaceChildren();
+
+  const pending = [];
+  for (const c of connectors) {
+    const connectorPending = c.quarantine?.state !== "approved";
+    const pendingTools = Object.entries(c.quarantine?.tools ?? {}).filter(([, t]) => t.state !== "approved");
+    if (connectorPending || pendingTools.length) pending.push({ c, connectorPending, pendingTools });
+  }
+
+  if (pending.length) {
+    const group = el(`<div class="group">
+      <div class="group-title">Needs approval</div>
+      <div class="inset" data-review></div>
+      <p class="group-footer">New tools stay off until you allow them.</p>
+    </div>`);
+    const inset = group.querySelector("[data-review]");
+    for (const { c, connectorPending, pendingTools } of pending) {
+      const row = el(`<div class="row">
+        <div class="row-main">
+          <div class="row-title">${esc(c.slug)}</div>
+          <div class="row-subtitle">${esc(transportLabel(c))} · ${esc(connectionLabel(c.upstreamStatus))}</div>
+        </div>
+        <div class="row-trailing" data-act></div>
+      </div>`);
+      const act = row.querySelector("[data-act]");
+      if (connectorPending) {
+        const btn = el(`<button type="button" class="btn primary">Allow</button>`);
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            await api("/api/approve/connector", {
+              method: "POST",
+              body: JSON.stringify({ slug: c.slug }),
+            });
+            toast(`${c.slug} is allowed`);
+            await refresh({ force: true });
+          } catch (err) {
+            toast(err instanceof Error ? err.message : String(err), "bad");
+            btn.disabled = false;
+          }
+        });
+        act.append(btn);
+      }
+      for (const [tool] of pendingTools) {
+        const btn = el(`<button type="button" class="btn">Allow ${esc(tool)}</button>`);
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            await api("/api/approve/tool", {
+              method: "POST",
+              body: JSON.stringify({ slug: c.slug, tool }),
+            });
+            toast(`Allowed ${tool}`);
+            await refresh({ force: true });
+          } catch (err) {
+            toast(err instanceof Error ? err.message : String(err), "bad");
+            btn.disabled = false;
+          }
+        });
+        act.append(btn);
+      }
+      inset.append(row);
+    }
+    panel.append(group);
+  }
+
+  const catalogGroup = el(`<div class="group">
+    <div class="group-title">Ready-made</div>
+    <div class="catalog-grid" data-catalog></div>
+    <p class="group-footer">Sign-in details are stored in your Mac keychain.</p>
+  </div>`);
+  const catalogGrid = catalogGroup.querySelector("[data-catalog]");
+  for (const entry of catalogEntries) {
+    const card = el(`<article class="catalog-card${entry.installed ? " added" : ""}">
+      <img class="catalog-logo" alt="" src="/logos/${esc(entry.id)}.svg" />
+      <div class="catalog-name">${esc(entry.title)}</div>
+      <p class="catalog-summary">${esc(entry.summary)}</p>
+      <div class="catalog-action"></div>
+    </article>`);
+    const action = card.querySelector(".catalog-action");
+    if (entry.installed) {
+      action.append(el(`<span class="pill ok">Added</span>`));
+    } else {
+      const label = entry.authMode === "oauth" || entry.authMode === "github" ? "Connect" : "Add";
+      const btn = el(`<button type="button" class="btn primary">${label}</button>`);
+      btn.addEventListener("click", () => openCatalogDialog(entry));
+      action.append(btn);
+    }
+    catalogGrid.append(card);
+  }
+  panel.append(catalogGroup);
+
+  const allowed = connectors.filter((c) => c.quarantine?.state === "approved");
+  const group = el(`<div class="group">
+    <div class="group-title">Allowed on this Mac</div>
+    <div class="inset" data-allowed></div>
+  </div>`);
+  const inset = group.querySelector("[data-allowed]");
+  if (!allowed.length) {
+    inset.append(
+      el(`<div class="empty" style="padding:18px 14px"><p>Nothing allowed yet. Add a tool above, then tap Allow.</p></div>`),
+    );
+  } else {
+    for (const c of allowed) {
+      inset.append(
+        el(`<div class="row">
+          <div class="row-main">
+            <div class="row-title">${esc(c.slug)}</div>
+            <div class="row-subtitle">${esc(transportLabel(c))} · ${esc(connectionLabel(c.upstreamStatus))}</div>
+          </div>
+          <div class="row-trailing"><span class="pill ok">Allowed</span></div>
+        </div>`),
+      );
+    }
+  }
+  panel.append(group);
+}
+
+function renderStatus(doctor, events, status) {
+  const panel = document.getElementById("panel-status");
+  panel.replaceChildren();
+
+  if (doctor.ok) {
+    panel.append(
+      el(`<div class="group">
+        <div class="group-title">Health</div>
+        <div class="inset">
+          <div class="row">
+            <div class="row-main">
+              <div class="row-title">System check</div>
+              <div class="row-subtitle">SoleMCP ${esc(status.version ?? "")} is running normally.</div>
+            </div>
+            <div class="row-trailing"><span class="pill ok">Healthy</span></div>
+          </div>
+        </div>
+      </div>`),
+    );
+  } else {
+    const group = el(`<div class="group">
+      <div class="group-title">Health</div>
+      <div class="inset" data-issues></div>
+    </div>`);
+    const inset = group.querySelector("[data-issues]");
+    for (const issue of doctor.issues ?? []) {
+      inset.append(
+        el(`<div class="row">
+          <div class="row-main">
+            <div class="row-title">Needs attention</div>
+            <div class="row-subtitle">${esc(humanIssue(issue))}</div>
+          </div>
+          <div class="row-trailing"><span class="pill warn">Issue</span></div>
+        </div>`),
+      );
+    }
+    panel.append(group);
+  }
+
+  const hist = el(`<div class="group">
+    <div class="group-title">Recent activity</div>
+    <div class="inset"></div>
+    <p class="group-footer">Secrets are never shown.</p>
+  </div>`);
+  const inset = hist.querySelector(".inset");
+  if (!events.length) {
+    inset.append(el(`<div class="empty" style="padding:18px 14px"><p>Nothing yet.</p></div>`));
+  } else {
+    const ul = el(`<ul class="activity"></ul>`);
+    for (const e of events) {
+      const when = e.at
+        ? new Date(e.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+        : "—";
+      ul.append(el(`<li><time>${esc(when)}</time><span>${esc(humanActivity(e.message))}</span></li>`));
+    }
+    inset.append(ul);
+  }
+  panel.append(hist);
+}
+
+document.querySelectorAll(".sidebar-nav button").forEach((btn) => {
+  btn.addEventListener("click", () => goTab(btn.dataset.tab));
+});
+
+const form = document.getElementById("add-form");
+const transport = form.elements.namedItem("transport");
+transport.addEventListener("change", () => {
+  const http = transport.value === "http";
+  form.querySelectorAll(".http-only").forEach((n) => n.classList.toggle("hidden", !http));
+  form.querySelectorAll(".stdio-only").forEach((n) => n.classList.toggle("hidden", http));
+});
+
+form.addEventListener("submit", async (ev) => {
+  const submitter = ev.submitter;
+  if (!submitter || submitter.value !== "ok") return;
+  ev.preventDefault();
+  const fd = new FormData(form);
+  const body = {
+    slug: String(fd.get("slug") ?? ""),
+    transport: String(fd.get("transport") ?? "stdio"),
+  };
+  if (body.transport === "stdio") {
+    body.argv = String(fd.get("argv") ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (!body.argv.length) {
+      toast("Enter the command that starts this tool", "bad");
+      return;
+    }
+  } else {
+    body.url = String(fd.get("url") ?? "");
+    body.sseFallback = true;
+    if (!body.url) {
+      toast("Enter the service address", "bad");
+      return;
+    }
+  }
+  try {
+    await api("/api/connectors", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("add-dialog").close();
+    form.reset();
+    toast("Tool added — allow it when ready");
+    await refresh({ force: true });
+  } catch (err) {
+    toast(err instanceof Error ? err.message : String(err), "bad");
+  }
+});
+
+const adoptForm = document.getElementById("adopt-form");
+adoptForm.addEventListener("submit", async (ev) => {
+  const submitter = ev.submitter;
+  if (!submitter || submitter.value !== "ok") return;
+  ev.preventDefault();
+  const path = String(new FormData(adoptForm).get("path") ?? "").trim();
+  if (!path) {
+    toast("Enter a folder path", "bad");
+    return;
+  }
+  try {
+    await api("/api/adopt", { method: "POST", body: JSON.stringify({ path }) });
+    document.getElementById("adopt-dialog").close();
+    adoptForm.reset();
+    toast("Project folder linked");
+    await refresh({ force: true });
+  } catch (err) {
+    toast(err instanceof Error ? err.message : String(err), "bad");
+  }
+});
+
+const catalogForm = document.getElementById("catalog-form");
+catalogForm.addEventListener("submit", async (ev) => {
+  const submitter = ev.submitter;
+  if (!submitter || submitter.value !== "ok") return;
+  ev.preventDefault();
+  const fd = new FormData(catalogForm);
+  const id = String(fd.get("id") ?? "");
+  const secrets = {};
+  for (const [key, value] of fd.entries()) {
+    if (key.startsWith("secret:") && String(value).trim()) {
+      secrets[key.slice("secret:".length)] = String(value);
+    }
+  }
+  const body = { id, secrets };
+  const path = String(fd.get("path") ?? "").trim();
+  if (path) body.path = path;
+  try {
+    await api("/api/catalog/install", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("catalog-dialog").close();
+    catalogForm.reset();
+    toast("Tool added — allow it when ready");
+    await refresh({ force: true });
+  } catch (err) {
+    toast(err instanceof Error ? err.message : String(err), "bad");
+  }
+});
+
+setPage("home");
+
+try {
+  if (!token) throw new Error("Open this page from Terminal with solemcp ui.");
+  await refresh({ force: true });
+  setInterval(() => {
+    refresh().catch(() => undefined);
+  }, 8000);
+} catch (err) {
+  pill.textContent = "Not signed in";
+  pill.className = "status-chip bad";
+  document.getElementById("panel-home").replaceChildren(
+    el(`<div class="err">${esc(err instanceof Error ? err.message : String(err))}</div>`),
+  );
+}
