@@ -365,4 +365,74 @@ describe("daemon M2", () => {
     expect(text).toContain("MISSING_TOKEN");
     expect(text).not.toContain(secretValue);
   });
+
+  it("a project keeps one account per service and can drop that link", async () => {
+    const { daemon } = await boot();
+    const adoptA = await cliRequest(daemon, { id: "1", method: "adopt", path: "/tmp/proj-a" });
+    const adoptB = await cliRequest(daemon, { id: "2", method: "adopt", path: "/tmp/proj-b" });
+    const projectA = (adoptA.result as { projectId: string }).projectId;
+    const projectB = (adoptB.result as { projectId: string }).projectId;
+
+    const work = await cliRequest(daemon, {
+      id: "3",
+      method: "connectorAdd",
+      slug: "notion",
+      transport: "stdio",
+      argv: [process.execPath, FIXTURE],
+      catalogId: "notion",
+      accountLabel: "Work",
+    });
+    const personal = await cliRequest(daemon, {
+      id: "4",
+      method: "connectorAdd",
+      slug: "notion-personal",
+      transport: "stdio",
+      argv: [process.execPath, FIXTURE],
+      catalogId: "notion",
+      accountLabel: "Personal",
+    });
+    expect(work.ok).toBe(true);
+    expect(personal.ok).toBe(true);
+
+    const first = await cliRequest(daemon, {
+      id: "5",
+      method: "connectorAssign",
+      slug: "notion",
+      projectId: projectA,
+    });
+    expect(first.ok).toBe(true);
+
+    const blocked = await cliRequest(daemon, {
+      id: "6",
+      method: "connectorAssign",
+      slug: "notion-personal",
+      projectId: projectA,
+    });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.error).toMatch(/already has Notion \(Work\)/);
+
+    const otherProject = await cliRequest(daemon, {
+      id: "7",
+      method: "connectorAssign",
+      slug: "notion-personal",
+      projectId: projectB,
+    });
+    expect(otherProject.ok).toBe(true);
+
+    const removed = await cliRequest(daemon, {
+      id: "8",
+      method: "connectorUnassign",
+      slug: "notion",
+      projectId: projectA,
+    });
+    expect(removed.ok).toBe(true);
+
+    const replaced = await cliRequest(daemon, {
+      id: "9",
+      method: "connectorAssign",
+      slug: "notion-personal",
+      projectId: projectA,
+    });
+    expect(replaced.ok).toBe(true);
+  });
 });

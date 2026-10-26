@@ -16,6 +16,7 @@ export type UiServerHandlers = {
   approveTool: (slug: string, tool: string) => Promise<void>;
   connectorAdd: (body: Record<string, unknown>) => Promise<unknown>;
   assign: (slug: string, projectId: string) => Promise<unknown>;
+  unassign: (slug: string, projectId: string) => Promise<unknown>;
   adopt: (path: string) => Promise<unknown>;
   clients: () => unknown | Promise<unknown>;
   clientInstall: (client: string) => Promise<unknown>;
@@ -180,6 +181,12 @@ async function handleApi(
   if (req.method === "POST" && url.pathname === "/api/assign") {
     const body = await readJson(req);
     const result = await handlers.assign(String(body.slug ?? ""), String(body.projectId ?? ""));
+    json(res, 200, { ok: true, result });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/unassign") {
+    const body = await readJson(req);
+    const result = await handlers.unassign(String(body.slug ?? ""), String(body.projectId ?? ""));
     json(res, 200, { ok: true, result });
     return;
   }

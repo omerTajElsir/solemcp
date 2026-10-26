@@ -12,11 +12,11 @@ const PAGE = {
   },
   tools: {
     title: "Tools",
-    lede: "Add services like GitHub or Notion. New tools wait for your approval.",
+    lede: "Connect an account, then attach it to a project. Allow it before Cursor can use it.",
   },
   projects: {
     title: "Projects",
-    lede: "Link folders you work in, then turn tools on for each one.",
+    lede: "Each folder uses one account per service. A second Notion login stays on its own project.",
   },
   status: {
     title: "Status",
@@ -26,6 +26,8 @@ const PAGE = {
 
 /** @type {{ tab: string, fingerprint: string }} */
 const uiState = { tab: "home", fingerprint: "" };
+const snapshot = { projects: [], connectors: [], catalog: [] };
+const linkState = { projectId: null, serviceId: null, lockProject: false };
 
 function setPage(tab) {
   const meta = PAGE[tab] ?? PAGE.home;
@@ -203,13 +205,13 @@ function setupProgress(clients, connectors, projects) {
     {
       id: "projects",
       done: linked > 0 && anyAssigned,
-      title: "Link a project and enable tools",
+      title: "Link a project and an account",
       body:
         linked === 0
-          ? "Link a folder, then enable tools for it."
+          ? "Link a folder, then connect one account for each service."
           : anyAssigned
-            ? "Tools are enabled on at least one project."
-            : "Enable an allowed tool on your linked project.",
+            ? "At least one project has an account."
+            : "Connect an account on your linked project.",
       cta: "Open projects",
       tab: "projects",
     },
@@ -242,6 +244,10 @@ async function refresh({ force = false } = {}) {
     status: status.version,
   });
 
+  snapshot.projects = projects.projects ?? [];
+  snapshot.connectors = connectors.connectors ?? [];
+  snapshot.catalog = catalog.entries ?? [];
+
   const list = connectors.connectors ?? [];
   const pending = list.filter((c) => c.quarantine?.state !== "approved").length;
   const progress = setupProgress(clients, connectors, projects);
@@ -269,7 +275,7 @@ async function refresh({ force = false } = {}) {
   renderHome(payload, progress);
   renderApps(clients);
   renderTools(list, catalog.entries ?? []);
-  renderProjects(projects.projects ?? [], list);
+  renderProjects(projects.projects ?? []);
   renderStatus(doctor, activity.events ?? [], status);
   applyPageActions(uiState.tab, payload);
 }
@@ -345,7 +351,7 @@ function renderHome(payload, progress) {
 
   if (remaining === 0) {
     panel.append(
-      el(`<p class="group-footer">Tip: after connecting a new tool, allow it under Tools, then enable it on a project.</p>`),
+      el(`<p class="group-footer">Tip: after connecting a new tool, allow it under Tools. It shows up on the project you linked it to.</p>`),
     );
   }
 }
@@ -464,7 +470,208 @@ function renderApps(guide) {
   panel.append(group);
 }
 
-function renderProjects(projects, connectors) {
+function serviceOf(connector) {
+  if (connector?.catalogId) return connector.catalogId;
+  const ids = snapshot.catalog.map((entry) => entry.id).sort((a, b) => b.length - a.length);
+  for (const id of ids) {
+    if (connector?.slug === id || connector?.slug?.startsWith(`${id}-`)) return id;
+  }
+  return null;
+}
+
+function catalogEntry(serviceId) {
+  return snapshot.catalog.find((entry) => entry.id === serviceId) ?? null;
+}
+
+function connectorHeading(connector) {
+  const entry = catalogEntry(serviceOf(connector));
+  const service = entry?.title ?? connector.slug;
+  return connector.accountLabel ? `${service} · ${connector.accountLabel}` : service;
+}
+
+function accountOnProject(project, serviceId) {
+  for (const assignment of project.assignments ?? []) {
+    const connector = snapshot.connectors.find((c) => c.id === assignment.connectorId);
+    if (connector && serviceOf(connector) === serviceId) return connector;
+  }
+  return null;
+}
+
+function rememberLinkContext(ctx) {
+  const form = document.getElementById("catalog-form");
+  form.elements.namedItem("projectId").value = ctx?.projectId ?? "";
+  form.elements.namedItem("accountLabel").value = ctx?.accountLabel ?? "";
+}
+
+function linkFields(ctx) {
+  const body = {};
+  if (ctx?.projectId) body.projectId = ctx.projectId;
+  if (ctx?.accountLabel) body.accountLabel = ctx.accountLabel;
+  return body;
+}
+
+function projectsUsing(connectorId) {
+  return snapshot.projects
+    .filter((project) => (project.assignments ?? []).some((assignment) => assignment.connectorId === connectorId))
+    .map((project) => projectLabel(project))
+    .join(", ");
+}
+
+function openLinkDialog(projectId, serviceId) {
+  linkState.projectId = projectId ?? null;
+  linkState.serviceId = serviceId ?? null;
+  linkState.lockProject = Boolean(projectId);
+  renderLink();
+  document.getElementById("link-dialog").showModal();
+}
+
+function renderLink() {
+  const body = document.getElementById("link-body");
+  const title = document.getElementById("link-title");
+  const summary = document.getElementById("link-summary");
+  body.replaceChildren();
+  const project = snapshot.projects.find((p) => p.id === linkState.projectId) ?? null;
+
+  if (!project) {
+    title.textContent = "Link an account";
+    summary.textContent = "Choose the project this account belongs to.";
+    if (!snapshot.projects.length) {
+      body.append(el(`<p class="group-footer">Link a folder first. Cursor matches that folder to the account.</p>`));
+      const btn = el(`<button type="button" class="btn primary">Link folder…</button>`);
+      btn.addEventListener("click", () => {
+        document.getElementById("link-dialog").close();
+        document.getElementById("adopt-dialog").showModal();
+      });
+      body.append(btn);
+      return;
+    }
+    for (const candidate of snapshot.projects) {
+      const btn = el(`<button type="button" class="service-choice">
+        <span class="row-main">
+          <span class="row-title">${esc(projectLabel(candidate))}</span>
+          <span class="row-subtitle">${esc((candidate.paths ?? []).join(", "))}</span>
+        </span>
+      </button>`);
+      btn.addEventListener("click", () => {
+        linkState.projectId = candidate.id;
+        renderLink();
+      });
+      body.append(btn);
+    }
+    return;
+  }
+
+  const entry = catalogEntry(linkState.serviceId);
+  if (!entry) {
+    title.textContent = projectLabel(project);
+    summary.textContent = "Pick a service. This project can keep one account for it.";
+    if (!linkState.lockProject) {
+      const back = el(`<button type="button" class="btn" style="margin-bottom:10px">All projects</button>`);
+      back.addEventListener("click", () => {
+        linkState.projectId = null;
+        renderLink();
+      });
+      body.append(back);
+    }
+    for (const candidate of snapshot.catalog) {
+      const linked = accountOnProject(project, candidate.id);
+      const btn = el(`<button type="button" class="service-choice">
+        <img class="catalog-logo" alt="" src="/logos/${esc(candidate.id)}.svg" />
+        <span class="row-main">
+          <span class="row-title">${esc(candidate.title)}</span>
+          <span class="row-subtitle">${esc(linked ? (linked.accountLabel ? linked.accountLabel : "Linked") : "Not linked")}</span>
+        </span>
+      </button>`);
+      btn.addEventListener("click", () => {
+        linkState.serviceId = candidate.id;
+        renderLink();
+      });
+      body.append(btn);
+    }
+    return;
+  }
+
+  title.textContent = entry.title;
+  const linked = accountOnProject(project, entry.id);
+  if (linked) {
+    summary.textContent = "This project already has an account for this service.";
+    body.append(el(`<p class="group-footer" style="margin-bottom:12px">${esc(projectLabel(project))} uses ${esc(connectorHeading(linked))}. Remove it before linking a different ${esc(entry.title)} account.</p>`));
+    const remove = el(`<button type="button" class="btn">Remove from this project</button>`);
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        await api("/api/unassign", {
+          method: "POST",
+          body: JSON.stringify({ slug: linked.slug, projectId: project.id }),
+        });
+        toast(`Removed ${connectorHeading(linked)}`);
+        await refresh({ force: true });
+        linkState.serviceId = null;
+        renderLink();
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), "bad");
+        remove.disabled = false;
+      }
+    });
+    body.append(remove);
+  } else {
+    summary.textContent = `Link one ${entry.title} account to ${projectLabel(project)}.`;
+    const existing = snapshot.connectors.filter((c) => serviceOf(c) === entry.id);
+    if (existing.length) {
+      body.append(el(`<p class="group-footer" style="margin-bottom:8px">Use an account already on this Mac</p>`));
+      for (const connector of existing) {
+        const use = el(`<button type="button" class="service-choice">
+          <img class="catalog-logo" alt="" src="/logos/${esc(entry.id)}.svg" />
+          <span class="row-main"><span class="row-title">${esc(connectorHeading(connector))}</span></span>
+        </button>`);
+        use.addEventListener("click", async () => {
+          use.disabled = true;
+          try {
+            await api("/api/assign", {
+              method: "POST",
+              body: JSON.stringify({ slug: connector.slug, projectId: project.id }),
+            });
+            document.getElementById("link-dialog").close();
+            const pending = connector.quarantine?.state !== "approved";
+            toast(pending ? `${connectorHeading(connector)} linked. Allow it on Tools before Cursor can use it.` : `${connectorHeading(connector)} linked`);
+            await refresh({ force: true });
+          } catch (err) {
+            toast(err instanceof Error ? err.message : String(err), "bad");
+            use.disabled = false;
+          }
+        });
+        body.append(use);
+      }
+    }
+    const another = existing.length > 0;
+    body.append(el(`<p class="group-footer" style="margin:8px 0">${another ? `Or sign in to a different ${esc(entry.title)} account` : `Sign in to ${esc(entry.title)}`}</p>`));
+    const label = el(`<label class="field">Account name
+      <input id="link-account-label" placeholder="${another ? "Personal" : "Work"}" ${another ? "required" : ""} />
+    </label>`);
+    body.append(label);
+    const verb = entry.authMode === "oauth" || entry.authMode === "github" ? "Sign in" : "Add";
+    const go = el(`<button type="button" class="btn primary">${verb}</button>`);
+    go.addEventListener("click", () => {
+      const accountLabel = document.getElementById("link-account-label").value.trim();
+      if (another && !accountLabel) {
+        toast("Name this account so you can tell it apart", "bad");
+        return;
+      }
+      document.getElementById("link-dialog").close();
+      openCatalogDialog(entry, { projectId: project.id, accountLabel });
+    });
+    body.append(go);
+  }
+
+  const back = el(`<button type="button" class="btn" style="margin-top:10px">All services</button>`);
+  back.addEventListener("click", () => {
+    linkState.serviceId = null;
+    renderLink();
+  });
+  body.append(back);
+}
+
+function renderProjects(projects) {
   const panel = document.getElementById("panel-projects");
   panel.replaceChildren();
 
@@ -472,7 +679,7 @@ function renderProjects(projects, connectors) {
     panel.append(
       el(`<div class="inset empty">
         <h3>No projects yet</h3>
-        <p>Link the folder your coding app has open, then enable tools for it.</p>
+        <p>Link the folder your coding app has open. Each project keeps one account per service.</p>
         <div style="margin-top:12px"><button type="button" class="btn primary" id="empty-adopt">Link folder…</button></div>
       </div>`),
     );
@@ -487,12 +694,8 @@ function renderProjects(projects, connectors) {
     <div class="inset" data-list></div>
   </div>`);
   const inset = group.querySelector("[data-list]");
-  const approved = connectors.filter((x) => x.quarantine?.state === "approved");
 
   for (const p of projects) {
-    const enabled = (p.assignments ?? [])
-      .map((a) => connectors.find((c) => c.id === a.connectorId)?.slug ?? a.connectorId)
-      .filter(Boolean);
     const paths = (p.paths ?? []).join(", ") || "—";
     const row = el(`<div class="row stack">
       <div class="row-main">
@@ -500,51 +703,58 @@ function renderProjects(projects, connectors) {
           <span class="pill ${p.adopted ? "ok" : ""}">${p.adopted ? "Linked" : "Not linked"}</span>
         </div>
         <div class="row-subtitle"><code>${esc(paths)}</code></div>
-        <div class="row-subtitle" style="margin-top:4px">Tools on: ${esc(enabled.join(", ") || "None yet")}</div>
       </div>
-      <div class="row-trailing" data-assign></div>
+      <div class="account-list" data-accounts></div>
     </div>`);
-    const trail = row.querySelector("[data-assign]");
-    if (!approved.length) {
-      trail.append(el(`<span class="row-subtitle">Allow a tool first</span>`));
+    const list = row.querySelector("[data-accounts]");
+    const linked = (p.assignments ?? [])
+      .map((a) => snapshot.connectors.find((c) => c.id === a.connectorId))
+      .filter(Boolean);
+    if (!linked.length) {
+      list.append(el(`<div class="row-subtitle">No accounts yet</div>`));
     }
-    for (const c of approved) {
-      const already = (p.assignments ?? []).some((a) => a.connectorId === c.id);
-      if (already) {
-        trail.append(el(`<span class="pill ok">${esc(c.slug)}</span>`));
-        continue;
-      }
-      const btn = el(`<button type="button" class="btn">Enable ${esc(c.slug)}</button>`);
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
+    for (const connector of linked) {
+      const serviceId = serviceOf(connector);
+      const logo = serviceId ? `/logos/${serviceId}.svg` : "";
+      const pending = connector.quarantine?.state !== "approved";
+      const account = el(`<div class="account-row">
+        ${logo ? `<img class="catalog-logo" alt="" src="${esc(logo)}" />` : ""}
+        <div class="row-main">
+          <div class="row-title">${esc(connectorHeading(connector))}</div>
+          <div class="row-subtitle">${pending ? "Needs approval" : "Ready"}</div>
+        </div>
+        <button type="button" class="btn" data-remove>Remove</button>
+      </div>`);
+      account.querySelector("[data-remove]").addEventListener("click", async () => {
         try {
-          await api("/api/assign", {
+          await api("/api/unassign", {
             method: "POST",
-            body: JSON.stringify({ slug: c.slug, projectId: p.id }),
+            body: JSON.stringify({ slug: connector.slug, projectId: p.id }),
           });
-          toast(`${c.slug} enabled`);
+          toast(`Removed ${connectorHeading(connector)}`);
           await refresh({ force: true });
         } catch (err) {
           toast(err instanceof Error ? err.message : String(err), "bad");
-          btn.disabled = false;
         }
       });
-      trail.append(btn);
+      list.append(account);
     }
+    const link = el(`<button type="button" class="btn primary">Link account</button>`);
+    link.addEventListener("click", () => openLinkDialog(p.id));
+    list.append(link);
     inset.append(row);
   }
   panel.append(group);
 }
 
-async function startOAuthCatalogInstall(entry) {
+async function startOAuthCatalogInstall(entry, ctx) {
   const res = await api("/api/catalog/install", {
     method: "POST",
-    body: JSON.stringify({ id: entry.id }),
+    body: JSON.stringify({ id: entry.id, ...linkFields(ctx) }),
   });
   const result = res.result ?? {};
   if (result.status === "complete") {
-    toast(`${entry.title} added — allow it when ready`);
-    goTab("tools");
+    finishLink(entry, ctx);
     await refresh({ force: true });
     return;
   }
@@ -558,8 +768,7 @@ async function startOAuthCatalogInstall(entry) {
     await new Promise((r) => setTimeout(r, 1000));
     const status = await api(`/api/catalog/oauth/${encodeURIComponent(result.sessionId)}`);
     if (status.status === "complete") {
-      toast(`${entry.title} connected — allow it when ready`);
-      goTab("tools");
+      finishLink(entry, ctx);
       await refresh({ force: true });
       return;
     }
@@ -568,27 +777,33 @@ async function startOAuthCatalogInstall(entry) {
   throw new Error("Timed out waiting for browser sign-in");
 }
 
-async function startGithubCatalogInstall(entry) {
+function finishLink(entry, ctx) {
+  const name = ctx?.accountLabel ? `${entry.title} (${ctx.accountLabel})` : entry.title;
+  toast(`${name} linked. Allow it on Tools before Cursor can use it.`);
+  goTab(ctx?.projectId ? "projects" : "tools");
+}
+
+async function startGithubCatalogInstall(entry, ctx) {
   const res = await api("/api/catalog/install", {
     method: "POST",
-    body: JSON.stringify({ id: entry.id, action: "connect" }),
+    body: JSON.stringify({ id: entry.id, action: "connect", ...linkFields(ctx) }),
   });
   const result = res.result ?? {};
   if (result.status === "complete") {
-    toast("GitHub added — allow it when ready");
-    goTab("tools");
+    finishLink(entry, ctx);
     await refresh({ force: true });
     return;
   }
   if (result.status !== "needs_auth") {
     throw new Error(result.message ?? result.error ?? "Could not connect GitHub");
   }
-  openGithubAuthDialog(entry, result);
+  openGithubAuthDialog(entry, result, ctx);
 }
 
-function openGithubAuthDialog(entry, needs) {
+function openGithubAuthDialog(entry, needs, ctx) {
   const form = document.getElementById("catalog-form");
   form.elements.namedItem("id").value = entry.id;
+  rememberLinkContext(ctx);
   document.getElementById("catalog-title").textContent = "Connect GitHub";
   document.getElementById("catalog-summary").textContent =
     needs.message ?? "Sign in with GitHub on this Mac, or paste an access token.";
@@ -603,13 +818,12 @@ function openGithubAuthDialog(entry, needs) {
       try {
         const res = await api("/api/catalog/install", {
           method: "POST",
-          body: JSON.stringify({ id: entry.id, action: "gh-login" }),
+          body: JSON.stringify({ id: entry.id, action: "gh-login", ...linkFields(ctx) }),
         });
         const result = res.result ?? {};
         if (result.status === "complete") {
           document.getElementById("catalog-dialog").close();
-          toast("GitHub connected — allow it when ready");
-          goTab("tools");
+          finishLink(entry, ctx);
           await refresh({ force: true });
           return;
         }
@@ -642,19 +856,23 @@ function openGithubAuthDialog(entry, needs) {
   document.getElementById("catalog-dialog").showModal();
 }
 
-function openCatalogDialog(entry) {
+function openCatalogDialog(entry, ctx) {
+  rememberLinkContext(ctx);
   if (entry.authMode === "oauth") {
-    startOAuthCatalogInstall(entry).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
+    startOAuthCatalogInstall(entry, ctx).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
     return;
   }
   if (entry.authMode === "github") {
-    startGithubCatalogInstall(entry).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
+    startGithubCatalogInstall(entry, ctx).catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
     return;
   }
   if (entry.authMode === "none" && !entry.needsPath) {
-    api("/api/catalog/install", { method: "POST", body: JSON.stringify({ id: entry.id }) })
+    api("/api/catalog/install", {
+      method: "POST",
+      body: JSON.stringify({ id: entry.id, ...linkFields(ctx) }),
+    })
       .then(async () => {
-        toast(`${entry.title} added — allow it when ready`);
+        finishLink(entry, ctx);
         await refresh({ force: true });
       })
       .catch((err) => toast(err instanceof Error ? err.message : String(err), "bad"));
@@ -663,6 +881,7 @@ function openCatalogDialog(entry) {
 
   const form = document.getElementById("catalog-form");
   form.elements.namedItem("id").value = entry.id;
+  rememberLinkContext(ctx);
   document.getElementById("catalog-title").textContent = `Add ${entry.title}`;
   document.getElementById("catalog-summary").textContent = entry.summary;
   const fields = document.getElementById("catalog-fields");
@@ -713,7 +932,7 @@ function renderTools(connectors, catalogEntries = []) {
     for (const { c, connectorPending, pendingTools } of pending) {
       const row = el(`<div class="row">
         <div class="row-main">
-          <div class="row-title">${esc(c.slug)}</div>
+          <div class="row-title">${esc(connectorHeading(c))}</div>
           <div class="row-subtitle">${esc(transportLabel(c))} · ${esc(connectionLabel(c.upstreamStatus))}</div>
         </div>
         <div class="row-trailing" data-act></div>
@@ -763,25 +982,24 @@ function renderTools(connectors, catalogEntries = []) {
   const catalogGroup = el(`<div class="group">
     <div class="group-title">Ready-made</div>
     <div class="catalog-grid" data-catalog></div>
-    <p class="group-footer">Sign-in details are stored in your Mac keychain.</p>
+    <p class="group-footer">Each project can use one account per service. Sign-in details stay in your Mac keychain.</p>
   </div>`);
   const catalogGrid = catalogGroup.querySelector("[data-catalog]");
   for (const entry of catalogEntries) {
-    const card = el(`<article class="catalog-card${entry.installed ? " added" : ""}">
+    const count = entry.accountCount ?? (entry.installed ? 1 : 0);
+    const countLabel = count === 0 ? "No account yet" : count === 1 ? "1 account" : `${count} accounts`;
+    const card = el(`<article class="catalog-card">
       <img class="catalog-logo" alt="" src="/logos/${esc(entry.id)}.svg" />
       <div class="catalog-name">${esc(entry.title)}</div>
       <p class="catalog-summary">${esc(entry.summary)}</p>
+      <div class="catalog-meta">${esc(countLabel)}</div>
       <div class="catalog-action"></div>
     </article>`);
     const action = card.querySelector(".catalog-action");
-    if (entry.installed) {
-      action.append(el(`<span class="pill ok">Added</span>`));
-    } else {
-      const label = entry.authMode === "oauth" || entry.authMode === "github" ? "Connect" : "Add";
-      const btn = el(`<button type="button" class="btn primary">${label}</button>`);
-      btn.addEventListener("click", () => openCatalogDialog(entry));
-      action.append(btn);
-    }
+    const label = count > 0 ? "Add account" : entry.authMode === "oauth" || entry.authMode === "github" ? "Connect" : "Add";
+    const btn = el(`<button type="button" class="btn primary">${label}</button>`);
+    btn.addEventListener("click", () => openLinkDialog(null, entry.id));
+    action.append(btn);
     catalogGrid.append(card);
   }
   panel.append(catalogGroup);
@@ -801,8 +1019,8 @@ function renderTools(connectors, catalogEntries = []) {
       inset.append(
         el(`<div class="row">
           <div class="row-main">
-            <div class="row-title">${esc(c.slug)}</div>
-            <div class="row-subtitle">${esc(transportLabel(c))} · ${esc(connectionLabel(c.upstreamStatus))}</div>
+            <div class="row-title">${esc(connectorHeading(c))}</div>
+            <div class="row-subtitle">${esc(projectsUsing(c.id) || "Not linked to a project")} · ${esc(connectionLabel(c.upstreamStatus))}</div>
           </div>
           <div class="row-trailing"><span class="pill ok">Allowed</span></div>
         </div>`),
@@ -942,6 +1160,12 @@ adoptForm.addEventListener("submit", async (ev) => {
   }
 });
 
+const linkForm = document.getElementById("link-form");
+linkForm.addEventListener("submit", (ev) => {
+  if (ev.submitter?.value === "cancel") return;
+  ev.preventDefault();
+});
+
 const catalogForm = document.getElementById("catalog-form");
 catalogForm.addEventListener("submit", async (ev) => {
   const submitter = ev.submitter;
@@ -957,12 +1181,17 @@ catalogForm.addEventListener("submit", async (ev) => {
   }
   const body = { id, secrets };
   const path = String(fd.get("path") ?? "").trim();
+  const projectId = String(fd.get("projectId") ?? "").trim();
+  const accountLabel = String(fd.get("accountLabel") ?? "").trim();
   if (path) body.path = path;
+  if (projectId) body.projectId = projectId;
+  if (accountLabel) body.accountLabel = accountLabel;
   try {
     await api("/api/catalog/install", { method: "POST", body: JSON.stringify(body) });
     document.getElementById("catalog-dialog").close();
     catalogForm.reset();
-    toast("Tool added — allow it when ready");
+    const entry = snapshot.catalog.find((item) => item.id === id) ?? { title: id };
+    finishLink(entry, { projectId, accountLabel });
     await refresh({ force: true });
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err), "bad");

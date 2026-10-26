@@ -114,10 +114,25 @@
           <p id="catalog-summary"></p>
         </header>
         <input type="hidden" name="id" />
+        <input type="hidden" name="projectId" />
+        <input type="hidden" name="accountLabel" />
         <div id="catalog-fields"></div>
         <menu class="sheet-actions">
           <button value="cancel" type="submit" formnovalidate class="btn">Cancel</button>
           <button value="ok" type="submit" class="btn primary">Continue</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="link-dialog" class="sheet">
+      <form method="dialog" id="link-form">
+        <header class="sheet-header">
+          <h2 id="link-title">Link an account</h2>
+          <p id="link-summary">A project can use one account for each service.</p>
+        </header>
+        <div id="link-body"></div>
+        <menu class="sheet-actions">
+          <button value="cancel" type="submit" class="btn">Close</button>
         </menu>
       </form>
     </dialog>

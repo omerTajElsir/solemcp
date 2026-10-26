@@ -63,6 +63,7 @@ export class OAuthInstallManager {
       sseFallback: boolean;
       bearerRef: string;
     }) => Promise<{ id: string; slug: string }>,
+    instance?: { slug: string; bearerRef: string; accountPrefix: string },
   ): Promise<OAuthInstallStatus> {
     if (entry.transport !== "http" || !entry.url) {
       throw new Error("OAuth is only supported for HTTP catalog entries");
@@ -72,8 +73,10 @@ export class OAuthInstallManager {
       this.callback = await startOAuthCallbackServer();
     }
 
-    const bearerRef = entry.oauthBearerRef ?? `${entry.slug.toUpperCase()}_OAUTH_TOKEN`;
-    const accountPrefix = `oauth:${entry.slug}`;
+    const slug = instance?.slug ?? entry.slug;
+    const bearerRef =
+      instance?.bearerRef ?? entry.oauthBearerRef ?? `${entry.slug.toUpperCase()}_OAUTH_TOKEN`;
+    const accountPrefix = instance?.accountPrefix ?? `oauth:${entry.slug}`;
     const provider = new KeychainOAuthProvider({
       keychain: this.keychain,
       accountPrefix,
@@ -125,7 +128,7 @@ export class OAuthInstallManager {
     if (outcome === "connected") {
       // Already had tokens.
       const result = await onAuthorized({
-        slug: entry.slug,
+        slug,
         url: entry.url,
         sseFallback: entry.sseFallback ?? true,
         bearerRef,
@@ -168,7 +171,7 @@ export class OAuthInstallManager {
         await client2.close().catch(() => undefined);
 
         const result = await onAuthorized({
-          slug: entry.slug,
+          slug,
           url: entry.url!,
           sseFallback: entry.sseFallback ?? true,
           bearerRef,

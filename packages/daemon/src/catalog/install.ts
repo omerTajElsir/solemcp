@@ -1,4 +1,5 @@
 import type { Keychain } from "../keychain.ts";
+import { catalogServiceOf } from "./accounts.ts";
 import {
   getCatalogEntry,
   POPULAR_CATALOG,
@@ -13,6 +14,7 @@ export type CatalogListItem = {
   transport: "stdio" | "http";
   authMode: "oauth" | "github" | "secret" | "none";
   installed: boolean;
+  accountCount: number;
   needsPath: boolean;
   pathLabel?: string;
   pathPlaceholder?: string;
@@ -23,9 +25,16 @@ export type CatalogListItem = {
 export async function listPopularCatalog(opts: {
   keychain: Keychain;
   installedSlugs: Set<string>;
+  accounts?: { slug: string; catalogId?: string }[];
 }): Promise<CatalogListItem[]> {
+  const catalogIds = POPULAR_CATALOG.map((entry) => entry.id);
   const items: CatalogListItem[] = [];
   for (const entry of POPULAR_CATALOG) {
+    const accountCount = opts.accounts
+      ? opts.accounts.filter((account) => catalogServiceOf(account, catalogIds) === entry.id).length
+      : opts.installedSlugs.has(entry.slug)
+        ? 1
+        : 0;
     const secrets = [];
     for (const s of entry.secrets) {
       const value = await opts.keychain.get(s.ref);
@@ -43,7 +52,8 @@ export async function listPopularCatalog(opts: {
       summary: entry.summary,
       transport: entry.transport,
       authMode: entry.authMode,
-      installed: opts.installedSlugs.has(entry.slug),
+      installed: accountCount > 0,
+      accountCount,
       needsPath: entry.needsPath === true,
       pathLabel: entry.pathLabel,
       pathPlaceholder: entry.pathPlaceholder,
@@ -63,6 +73,7 @@ export async function prepareCatalogInstall(
     keychain: Keychain;
     secrets?: Record<string, string>;
     path?: string;
+    instanceSlug?: string;
   },
 ): Promise<{
   entry: CatalogEntry;
@@ -85,15 +96,17 @@ export async function prepareCatalogInstall(
 
   const provided = opts.secrets ?? {};
   const secretsStored: string[] = [];
+  const instanceSlug = opts.instanceSlug ?? entry.slug;
 
   for (const field of entry.secrets) {
-    const raw = provided[field.ref]?.trim();
+    const ref = instanceSlug === entry.slug ? field.ref : `${instanceSlug}:${field.ref}`;
+    const raw = (provided[ref] ?? provided[field.ref])?.trim();
     if (raw) {
       const value = `${field.valuePrefix ?? ""}${raw}`;
-      await opts.keychain.set(field.ref, value);
-      secretsStored.push(field.ref);
+      await opts.keychain.set(ref, value);
+      secretsStored.push(ref);
     } else {
-      const existing = await opts.keychain.get(field.ref);
+      const existing = await opts.keychain.get(ref);
       if (!existing) {
         throw new Error(`missing secret ${field.ref} (${field.label})`);
       }
@@ -110,10 +123,11 @@ export async function prepareCatalogInstall(
   const headerRefs: Record<string, string> = {};
   const secretRefs: string[] = [];
   for (const field of entry.secrets) {
+    const ref = instanceSlug === entry.slug ? field.ref : `${instanceSlug}:${field.ref}`;
     if (field.header) {
-      headerRefs[field.header] = field.ref;
+      headerRefs[field.header] = ref;
     } else {
-      secretRefs.push(field.ref);
+      secretRefs.push(ref);
     }
   }
 
@@ -121,7 +135,7 @@ export async function prepareCatalogInstall(
     entry,
     secretsStored,
     add: {
-      slug: entry.slug,
+      slug: instanceSlug,
       transport: entry.transport,
       ...(argv ? { argv } : {}),
       ...(entry.url ? { url: entry.url } : {}),

@@ -24,6 +24,7 @@ describe("loopback UI server", () => {
         approveTool: async () => undefined,
         connectorAdd: async () => ({ id: "x", slug: "x" }),
         assign: async () => ({ assigned: true }),
+        unassign: async () => ({ unassigned: true }),
         adopt: async () => ({ projectId: "p1" }),
         clients: () => ({ clients: [] }),
         clientInstall: async () => ({ wrote: false }),

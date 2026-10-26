@@ -65,6 +65,8 @@ export type ControlRequest =
       secretRefs?: string[];
       headerRefs?: Record<string, string>;
       cwd?: "daemon" | "project";
+      catalogId?: string;
+      accountLabel?: string;
     }
   | {
       id: string;
@@ -72,6 +74,12 @@ export type ControlRequest =
       slug: string;
       projectId: string;
       toolPolicy?: ToolPolicy;
+    }
+  | {
+      id: string;
+      method: "connectorUnassign";
+      slug: string;
+      projectId: string;
     }
   | { id: string; method: "doctor" }
   | { id: string; method: "backup" }
@@ -105,6 +113,7 @@ const CONTROL_METHODS = new Set<ControlRequest["method"]>([
   "pin",
   "connectorAdd",
   "connectorAssign",
+  "connectorUnassign",
   "doctor",
   "backup",
   "rollback",

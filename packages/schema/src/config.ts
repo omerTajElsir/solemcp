@@ -36,6 +36,10 @@ const connectorCommon = {
   secretRefs: z.array(z.string()),
   origin: connectorOriginSchema,
   quarantine: quarantineSchema,
+  /** Catalog service id, when this connector came from the ready-made list. */
+  catalogId: z.string().min(1).max(64).optional(),
+  /** Person-facing name for this login, such as "Work". */
+  accountLabel: z.string().min(1).max(40).optional(),
 };
 
 /**
