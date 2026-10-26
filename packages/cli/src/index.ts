@@ -5,7 +5,15 @@ import { redact } from "@solemcp/core";
 import { ArgvError, parseArgv, type ClientName } from "./argv.ts";
 import { exportClientEntry } from "./adapters/export.ts";
 import { previewImport, type ImportSourceFile } from "./adapters/import.ts";
-import { resolveBridgeLaunch } from "@solemcp/daemon";
+import {
+  bootstrapLaunchAgent,
+  bootoutLaunchAgent,
+  defaultLaunchAgentsDir,
+  installLaunchAgent,
+  resolveBridgeLaunch,
+  resolveSolemcpEntryPath,
+  uninstallLaunchAgent,
+} from "@solemcp/daemon";
 import { installCursor } from "./adapters/cursor.ts";
 import { installClaudeCode, CLAUDE_ADD_COMMAND } from "./adapters/claude-code.ts";
 import { installCodex, CODEX_ADD_COMMAND } from "./adapters/codex.ts";
@@ -78,8 +86,20 @@ Commands:
   backup
   rollback [id]
   doctor
+  service install
+  service uninstall
   ${uiHelpLine()}
 `;
+
+async function stopForegroundDaemon(): Promise<void> {
+  try {
+    const client = new SocketControlClient();
+    await client.request({ method: "shutdown" });
+  } catch {
+    // No daemon is listening. Install can bootstrap a fresh one.
+  }
+  await new Promise((resolve) => setTimeout(resolve, 400));
+}
 
 function defaultIo(): CliIo {
   return {
@@ -149,6 +169,31 @@ export async function runCli(argv: readonly string[], deps: CliDeps = {}): Promi
         return runUiCommand({
           stdinIsTTY: deps.stdinIsTTY ?? Boolean(process.stdin.isTTY),
         });
+
+      case "service-install": {
+        await stopForegroundDaemon();
+        const home = homedir();
+        const { plistPath } = await installLaunchAgent({
+          home,
+          nodePath: process.execPath,
+          entryPath: resolveSolemcpEntryPath(),
+          launchAgentsDir: defaultLaunchAgentsDir(home),
+          bootstrap: bootstrapLaunchAgent,
+        });
+        printOut(`installed login agent ${plistPath}`);
+        printOut("SoleMCP starts at login and restarts if it exits. Logs: ~/.solemcp/logs");
+        return 0;
+      }
+
+      case "service-uninstall": {
+        const home = homedir();
+        const { plistPath } = await uninstallLaunchAgent({
+          launchAgentsDir: defaultLaunchAgentsDir(home),
+          bootout: (plistPath) => bootoutLaunchAgent(plistPath),
+        });
+        printOut(`removed login agent ${plistPath}`);
+        return 0;
+      }
 
       case "approve-connector": {
         const isTTY = deps.stdinIsTTY ?? Boolean(process.stdin.isTTY);

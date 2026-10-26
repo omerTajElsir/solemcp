@@ -10,6 +10,16 @@ export { defaultPeerCheck, assertPeerAllowed } from "./peer.ts";
 export { UpstreamManager } from "./upstream.ts";
 export type { UpstreamStatus } from "./upstream.ts";
 
+export {
+  LAUNCH_AGENT_LABEL,
+  renderLaunchAgentPlist,
+  installLaunchAgent,
+  uninstallLaunchAgent,
+  bootstrapLaunchAgent,
+  bootoutLaunchAgent,
+  defaultLaunchAgentsDir,
+} from "./launchd.ts";
+
 export { startDaemon } from "./daemon.ts";
 export type { DaemonOptions, DaemonHandle } from "./daemon.ts";
 

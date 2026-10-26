@@ -33,6 +33,8 @@ export type ParsedCommand =
   | { name: "rollback"; id?: string }
   | { name: "doctor" }
   | { name: "ui" }
+  | { name: "service-install" }
+  | { name: "service-uninstall" }
   | { name: "help" };
 
 export class ArgvError extends Error {
@@ -73,6 +75,8 @@ export function parseArgv(argv: readonly string[]): ParsedCommand {
       return { name: "doctor" };
     case "ui":
       return { name: "ui" };
+    case "service":
+      return parseService(rest);
     default:
       throw new ArgvError(`unknown command: ${cmd}`);
   }
@@ -97,6 +101,12 @@ function parseApprove(rest: readonly string[]): ParsedCommand {
     return { name: "approve-tool", slug, tool };
   }
   throw new ArgvError("usage: solemcp approve connector|tool ...");
+}
+
+function parseService(rest: readonly string[]): ParsedCommand {
+  if (rest[0] === "install") return { name: "service-install" };
+  if (rest[0] === "uninstall") return { name: "service-uninstall" };
+  throw new ArgvError("usage: solemcp service install|uninstall");
 }
 
 function parseProject(rest: readonly string[]): ParsedCommand {
