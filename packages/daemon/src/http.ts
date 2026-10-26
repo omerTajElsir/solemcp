@@ -202,6 +202,14 @@ export class HttpUpstreamManager {
     }
   }
 
+  /** Clear a failed HTTP connector and connect once. No timer retries after failure. */
+  async reconnect(connector: HttpConnector): Promise<void> {
+    await this.stop(connector.id);
+    const managed = this.byId.get(connector.id);
+    if (managed) managed.status = "stopped";
+    await this.ensureStarted(connector);
+  }
+
   async stop(connectorId: string): Promise<void> {
     const managed = this.byId.get(connectorId);
     if (!managed) return;
@@ -241,11 +249,24 @@ export class HttpUpstreamManager {
       managed.kind = handle.kind;
 
       const listed = await handle.client.listTools();
-      managed.tools = (listed.tools ?? []).map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        inputSchema: t.inputSchema ?? { type: "object" },
-      }));
+      managed.tools = (listed.tools ?? []).map((t) => {
+        const annotations = t.annotations;
+        return {
+          name: t.name,
+          description: t.description ?? "",
+          inputSchema: t.inputSchema ?? { type: "object" },
+          ...(annotations
+            ? {
+                annotations: {
+                  ...(annotations.readOnlyHint === true ? { readOnlyHint: true as const } : {}),
+                  ...(annotations.destructiveHint === true
+                    ? { destructiveHint: true as const }
+                    : {}),
+                },
+              }
+            : {}),
+        };
+      });
       managed.status = "running";
     } catch (err) {
       managed.handle = null;

@@ -50,6 +50,22 @@ function redactUrlUserinfo(text: string): string {
   );
 }
 
+/**
+ * Credential-shaped tokens that should not be written even when the exact
+ * secret value is not in the known list. Applied after {@link redact}.
+ */
+const CREDENTIAL_SHAPED =
+  /\bBearer\s+[A-Za-z0-9._~+/-]{12,}|ghp_[A-Za-z0-9]{12,}|gho_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|sk-[A-Za-z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16}\b/g;
+
+export function redactCredentialShaped(text: string): string {
+  return text.replace(CREDENTIAL_SHAPED, "[redacted]");
+}
+
+/** Known secrets, headers, userinfo, then credential-shaped tokens. */
+export function redactForLog(text: string, secretValues: readonly string[]): string {
+  return redactCredentialShaped(redact(text, secretValues));
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

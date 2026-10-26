@@ -8,6 +8,9 @@ describe("catalog accounts", () => {
     expect(catalogServiceOf({ slug: "notion-work" }, ids)).toBe("notion");
     expect(catalogServiceOf({ slug: "gitlab" }, ids)).toBe("gitlab");
     expect(catalogServiceOf({ slug: "my-tool" }, ids)).toBeNull();
+    expect(
+      catalogServiceOf({ slug: "files", catalogId: "io.github.example/filesystem" }, ids),
+    ).toBe("io.github.example/filesystem");
   });
 
   it("keeps the first account on the catalog slug and names the next one", () => {

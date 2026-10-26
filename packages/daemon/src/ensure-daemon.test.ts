@@ -1,4 +1,4 @@
-import { mkdtemp, access } from "node:fs/promises";
+import { mkdtemp, access, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,14 @@ describe("ensureDaemonRunning", () => {
       env: { ...process.env, SOLEMCP_HOME: home },
     });
     await access(socketPath(home));
+    const pid = Number((await readFile(join(home, ".solemcp", "run", "daemon.pid"), "utf8")).trim());
+    if (Number.isFinite(pid)) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already exited
+      }
+    }
     expect(true).toBe(true);
   }, 15000);
 });

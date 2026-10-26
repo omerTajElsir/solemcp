@@ -25,6 +25,7 @@ describe("daemon M2", () => {
   const daemons: DaemonHandle[] = [];
 
   afterEach(async () => {
+    delete process.env.SOLEMCP_FIXTURE_TOOLS;
     while (daemons.length) {
       const d = daemons.pop()!;
       await d.close().catch(() => undefined);
@@ -35,13 +36,17 @@ describe("daemon M2", () => {
     }
   });
 
-  async function boot(keychain = new MemoryKeychain()) {
+  async function boot(
+    keychain = new MemoryKeychain(),
+    upstreamTiming?: { baseDelayMs: number; maxFailures: number; capMs: number },
+  ) {
     const home = await mkdtemp(join(tmpdir(), "solemcp-daemon-"));
     homes.push(home);
     const daemon = await startDaemon({
       home,
       keychain,
       peerCheck: () => null,
+      ...(upstreamTiming ? { upstreamTiming } : {}),
     });
     daemons.push(daemon);
     return { home, keychain, daemon };
@@ -135,6 +140,52 @@ describe("daemon M2", () => {
     reader.close();
     sock.end();
     return listed.result?.tools ?? [];
+  }
+
+  async function bridgeCall(
+    daemon: DaemonHandle,
+    root: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ result?: unknown; error?: { message?: string } }> {
+    const sock = await connect(daemon.socketPath);
+    const reader = frameReader(sock);
+    sock.write(
+      encodeFrame({
+        type: "hello",
+        token: daemon.token,
+        role: "bridge",
+        root,
+      }),
+    );
+    sock.write(
+      encodeFrame({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "0.0.0" },
+        },
+      }),
+    );
+    await reader.next();
+    sock.write(
+      encodeFrame({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    );
+    const response = (await reader.next()) as {
+      result?: unknown;
+      error?: { message?: string };
+    };
+    reader.close();
+    sock.end();
+    return response;
   }
 
   it("rejects a wrong token", async () => {
@@ -434,5 +485,253 @@ describe("daemon M2", () => {
       projectId: projectA,
     });
     expect(replaced.ok).toBe(true);
+  });
+
+  it("reads-only runs annotated reads and hides writes until they are named", async () => {
+    process.env.SOLEMCP_FIXTURE_TOOLS = "annotated";
+    const { daemon } = await boot();
+    const root = "/tmp/reads-only-repo";
+    const adopt = await cliRequest(daemon, { id: "1", method: "adopt", path: root });
+    const projectId = (adopt.result as { projectId: string }).projectId;
+    await cliRequest(daemon, {
+      id: "2",
+      method: "connectorAdd",
+      slug: "fixture",
+      transport: "stdio",
+      argv: [process.execPath, FIXTURE],
+    });
+    await cliRequest(daemon, {
+      id: "3",
+      method: "connectorAssign",
+      slug: "fixture",
+      projectId,
+      toolPolicy: { mode: "all-approved" },
+    });
+    await cliRequest(daemon, { id: "4", method: "approveConnector", slug: "fixture" });
+    await bridgeToolsList(daemon, root);
+    for (const tool of ["echo", "read_item", "delete_item", "mutate_item"]) {
+      await cliRequest(daemon, { id: `5-${tool}`, method: "approveTool", slug: "fixture", tool });
+    }
+
+    const full = (await bridgeToolsList(daemon, root)).map((t) => t.name).sort();
+    expect(full).toEqual(
+      ["fixture__delete_item", "fixture__echo", "fixture__mutate_item", "fixture__read_item", STATUS_TOOL].sort(),
+    );
+
+    const updated = await cliRequest(daemon, {
+      id: "6",
+      method: "projectUpdate",
+      projectId,
+      readsOnly: true,
+    });
+    expect(updated.ok).toBe(true);
+    expect((await bridgeToolsList(daemon, root)).map((t) => t.name).sort()).toEqual(
+      ["fixture__read_item", STATUS_TOOL].sort(),
+    );
+
+    const denied = await bridgeCall(daemon, root, "fixture__echo", { message: "nope" });
+    expect(denied.error?.message).toMatch(/not allowed/);
+
+    await cliRequest(daemon, {
+      id: "7",
+      method: "connectorAssign",
+      slug: "fixture",
+      projectId,
+      toolPolicy: { allow: ["echo", "read_item"] },
+    });
+    expect((await bridgeToolsList(daemon, root)).map((t) => t.name).sort()).toEqual(
+      ["fixture__echo", "fixture__read_item", STATUS_TOOL].sort(),
+    );
+
+    await cliRequest(daemon, {
+      id: "8",
+      method: "projectUpdate",
+      projectId,
+      readsOnly: false,
+    });
+    await cliRequest(daemon, {
+      id: "9",
+      method: "connectorAssign",
+      slug: "fixture",
+      projectId,
+      toolPolicy: { mode: "all-approved" },
+    });
+    expect((await bridgeToolsList(daemon, root)).map((t) => t.name)).toContain("fixture__mutate_item");
+  });
+
+  it("search mode advertises search and call instead of the tool list", async () => {
+    process.env.SOLEMCP_FIXTURE_TOOLS = "annotated";
+    const { daemon } = await boot();
+    const root = "/tmp/search-mode-repo";
+    const adopt = await cliRequest(daemon, { id: "1", method: "adopt", path: root });
+    const projectId = (adopt.result as { projectId: string }).projectId;
+    await cliRequest(daemon, {
+      id: "2",
+      method: "connectorAdd",
+      slug: "fixture",
+      transport: "stdio",
+      argv: [process.execPath, FIXTURE],
+    });
+    await cliRequest(daemon, {
+      id: "3",
+      method: "connectorAssign",
+      slug: "fixture",
+      projectId,
+    });
+    await cliRequest(daemon, { id: "4", method: "approveConnector", slug: "fixture" });
+    await bridgeToolsList(daemon, root);
+    await cliRequest(daemon, { id: "5", method: "approveTool", slug: "fixture", tool: "read_item" });
+    await cliRequest(daemon, { id: "6", method: "approveTool", slug: "fixture", tool: "echo" });
+
+    const enabled = await cliRequest(daemon, {
+      id: "7",
+      method: "projectUpdate",
+      projectId,
+      searchMode: true,
+    });
+    expect(enabled.ok).toBe(true);
+    expect((await bridgeToolsList(daemon, root)).map((t) => t.name).sort()).toEqual(
+      ["solemcp__call", "solemcp__search", STATUS_TOOL].sort(),
+    );
+
+    const found = await bridgeCall(daemon, root, "solemcp__search", { query: "read" });
+    const text = JSON.stringify(found.result);
+    expect(text).toContain("fixture__read_item");
+    expect(text).not.toContain("fixture__echo");
+
+    const called = await bridgeCall(daemon, root, "solemcp__call", {
+      name: "fixture__echo",
+      arguments: { message: "hi" },
+    });
+    expect(JSON.stringify(called.result)).toContain("hi");
+    expect(called.error).toBeUndefined();
+
+    const direct = await bridgeCall(daemon, root, "fixture__read_item", {});
+    expect(direct.error?.message).toMatch(/search mode/);
+
+    await cliRequest(daemon, {
+      id: "8",
+      method: "projectUpdate",
+      projectId,
+      searchMode: false,
+    });
+    expect((await bridgeToolsList(daemon, root)).map((t) => t.name)).toContain("fixture__read_item");
+  });
+
+  it("call log omits arguments and redacts secrets from results and errors", async () => {
+    const keychain = new MemoryKeychain();
+    const secret = "super-secret-value-do-not-leak";
+    await keychain.set("LEAK_TEST", secret);
+    const { home, daemon } = await boot(keychain);
+    const root = "/tmp/call-log-repo";
+    const adopt = await cliRequest(daemon, { id: "1", method: "adopt", path: root });
+    const projectId = (adopt.result as { projectId: string }).projectId;
+    await cliRequest(daemon, {
+      id: "2",
+      method: "connectorAdd",
+      slug: "fixture",
+      transport: "stdio",
+      argv: [process.execPath, FIXTURE],
+      secretRefs: ["LEAK_TEST"],
+    });
+    await cliRequest(daemon, {
+      id: "3",
+      method: "connectorAssign",
+      slug: "fixture",
+      projectId,
+    });
+    await cliRequest(daemon, { id: "4", method: "approveConnector", slug: "fixture" });
+    await bridgeToolsList(daemon, root);
+    await cliRequest(daemon, { id: "5", method: "approveTool", slug: "fixture", tool: "echo" });
+
+    const okCall = await bridgeCall(daemon, root, "fixture__echo", { message: secret });
+    expect(JSON.stringify(okCall.result)).toContain(secret);
+
+    const failCall = await bridgeCall(daemon, root, "fixture__echo", {
+      message: `ERROR:${secret}`,
+    });
+    expect(failCall.error?.message).toContain(secret);
+
+    const shaped = "ghp_abcdefghijklmnopqrstuvwxyz";
+    await bridgeCall(daemon, root, "fixture__echo", { message: `ERROR:${shaped}` });
+
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(join(home, ".solemcp", "logs", "calls.json"), "utf8");
+    expect(raw).not.toContain(secret);
+    expect(raw).not.toContain(shaped);
+    expect(raw).not.toContain("arguments");
+    expect(raw).not.toContain(`"message"`);
+    const parsed = JSON.parse(raw) as { entries: Array<Record<string, unknown>> };
+    expect(parsed.entries.some((entry) => entry.tool === "fixture__echo" && entry.ok === true)).toBe(
+      true,
+    );
+    expect(parsed.entries.some((entry) => entry.ok === false && entry.error === "ERROR:[redacted]")).toBe(
+      true,
+    );
+    for (const entry of parsed.entries) {
+      expect(entry).not.toHaveProperty("arguments");
+      expect(entry).not.toHaveProperty("result");
+      expect(entry).not.toHaveProperty("resultText");
+    }
+  });
+
+  it("a failed connector stays stopped until reconnect", async () => {
+    const { daemon } = await boot(new MemoryKeychain(), {
+      baseDelayMs: 10,
+      maxFailures: 2,
+      capMs: 40,
+    });
+    const root = "/tmp/failed-repo";
+    const adopt = await cliRequest(daemon, { id: "1", method: "adopt", path: root });
+    const projectId = (adopt.result as { projectId: string }).projectId;
+    await cliRequest(daemon, {
+      id: "2",
+      method: "connectorAdd",
+      slug: "crash",
+      transport: "stdio",
+      argv: [process.execPath, "-e", "process.exit(1)"],
+    });
+    await cliRequest(daemon, {
+      id: "3",
+      method: "connectorAssign",
+      slug: "crash",
+      projectId,
+    });
+    await cliRequest(daemon, { id: "4", method: "approveConnector", slug: "crash" });
+
+    const started = Date.now();
+    let failed = false;
+    while (Date.now() - started < 4000) {
+      await bridgeToolsList(daemon, root).catch(() => undefined);
+      const listed = await cliRequest(daemon, { id: "5", method: "listConnectors" });
+      const row = (
+        listed.result as { connectors: Array<{ slug: string; upstreamStatus: string }> }
+      ).connectors.find((c) => c.slug === "crash");
+      if (row?.upstreamStatus === "failed") {
+        failed = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    expect(failed).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const still = await cliRequest(daemon, { id: "6", method: "listConnectors" });
+    const row = (
+      still.result as { connectors: Array<{ slug: string; upstreamStatus: string }> }
+    ).connectors.find((c) => c.slug === "crash");
+    expect(row?.upstreamStatus).toBe("failed");
+
+    const status = await bridgeCall(daemon, root, STATUS_TOOL, {});
+    const text = (status.result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+    const body = JSON.parse(text) as { failures: Array<{ slug: string; status: string }> };
+    expect(body.failures).toEqual([{ slug: "crash", status: "failed" }]);
+
+    const again = await cliRequest(daemon, {
+      id: "7",
+      method: "connectorReconnect",
+      slug: "crash",
+    });
+    expect(again.ok).toBe(false);
   });
 });

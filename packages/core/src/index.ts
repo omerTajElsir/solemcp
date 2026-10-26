@@ -13,9 +13,14 @@ export type {
 } from "./resolve-session.ts";
 
 export { applyToolList, visibleTools } from "./quarantine.ts";
-export type { ListedTool } from "./quarantine.ts";
+export type { ListedTool, ToolAnnotations } from "./quarantine.ts";
 
-export { redact } from "./redact.ts";
+export { countsAsWrite, filterReadsOnly } from "./reads-only.ts";
+
+export { searchTools } from "./search-tools.ts";
+export type { SearchHit } from "./search-tools.ts";
+
+export { redact, redactForLog } from "./redact.ts";
 
 export { mergeConfig } from "./merge-config.ts";
 export type { MergeResult } from "./merge-config.ts";

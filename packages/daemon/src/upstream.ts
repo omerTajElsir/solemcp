@@ -8,6 +8,51 @@ const BACKOFF_CAP_MS = 30_000;
 const FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_FAILURES = 5;
 
+export type UpstreamTiming = {
+  maxFailures: number;
+  failureWindowMs: number;
+  baseDelayMs: number;
+  capMs: number;
+};
+
+export const DEFAULT_UPSTREAM_TIMING: UpstreamTiming = {
+  maxFailures: MAX_FAILURES,
+  failureWindowMs: FAILURE_WINDOW_MS,
+  baseDelayMs: 1000,
+  capMs: BACKOFF_CAP_MS,
+};
+
+/**
+ * Five failures inside the window stop the connector. Fewer failures schedule
+ * a backoff restart. A failed result has no delay, so nothing starts it again.
+ */
+export function nextUpstreamFailure(
+  state: {
+    failures: number[];
+    restartAttempt: number;
+    now: number;
+  },
+  timing: UpstreamTiming = DEFAULT_UPSTREAM_TIMING,
+): {
+  status: "failed" | "stopped";
+  failures: number[];
+  restartAttempt: number;
+  delayMs?: number;
+} {
+  const failures = state.failures.filter((t) => state.now - t < timing.failureWindowMs);
+  failures.push(state.now);
+  if (failures.length >= timing.maxFailures) {
+    return { status: "failed", failures, restartAttempt: state.restartAttempt };
+  }
+  const delayMs = Math.min(timing.baseDelayMs * 2 ** state.restartAttempt, timing.capMs);
+  return {
+    status: "stopped",
+    failures,
+    restartAttempt: state.restartAttempt + 1,
+    delayMs,
+  };
+}
+
 export type UpstreamStatus = "stopped" | "starting" | "running" | "failed";
 
 type Pending = {
@@ -38,8 +83,14 @@ type ManagedUpstream = {
  */
 export class UpstreamManager {
   private readonly byId = new Map<string, ManagedUpstream>();
+  private readonly timing: UpstreamTiming;
 
-  constructor(private readonly keychain: Keychain) {}
+  constructor(
+    private readonly keychain: Keychain,
+    timing: Partial<UpstreamTiming> = {},
+  ) {
+    this.timing = { ...DEFAULT_UPSTREAM_TIMING, ...timing };
+  }
 
   getStatus(connectorId: string): UpstreamStatus {
     return this.byId.get(connectorId)?.status ?? "stopped";
@@ -134,6 +185,29 @@ export class UpstreamManager {
         // Doctor / status surface failures; do not throw the sync.
       }
     }
+  }
+
+  /**
+   * Leave the failed state and start again. Crash backoff does not run
+   * while status is failed; only this call clears it.
+   */
+  async reconnect(
+    connector: StdioConnector,
+    opts: { cwd?: string } = {},
+  ): Promise<void> {
+    const managed = this.byId.get(connector.id);
+    if (managed?.restartTimer) {
+      clearTimeout(managed.restartTimer);
+      managed.restartTimer = null;
+    }
+    await this.stop(connector.id);
+    const after = this.byId.get(connector.id);
+    if (after) {
+      after.failures = [];
+      after.restartAttempt = 0;
+      after.status = "stopped";
+    }
+    await this.ensureStarted(connector, opts);
   }
 
   async stop(connectorId: string): Promise<void> {
@@ -239,12 +313,25 @@ export class UpstreamManager {
       });
       this.notify(managed, "notifications/initialized", {});
       const listed = (await this.request(managed, "tools/list", {})) as {
-        tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+        tools?: Array<{
+          name: string;
+          description?: string;
+          inputSchema?: unknown;
+          annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+        }>;
       };
       managed.tools = (listed.tools ?? []).map((t) => ({
         name: t.name,
         description: t.description ?? "",
         inputSchema: t.inputSchema ?? { type: "object" },
+        ...(t.annotations
+          ? {
+              annotations: {
+                ...(t.annotations.readOnlyHint === true ? { readOnlyHint: true } : {}),
+                ...(t.annotations.destructiveHint === true ? { destructiveHint: true } : {}),
+              },
+            }
+          : {}),
       }));
       managed.status = "running";
       managed.restartAttempt = 0;
@@ -261,21 +348,23 @@ export class UpstreamManager {
   }
 
   private recordFailure(managed: ManagedUpstream): void {
-    const now = Date.now();
-    managed.failures = managed.failures.filter((t) => now - t < FAILURE_WINDOW_MS);
-    managed.failures.push(now);
-    if (managed.failures.length >= MAX_FAILURES) {
-      managed.status = "failed";
-      return;
-    }
-    managed.status = "stopped";
-    const delay = Math.min(1000 * 2 ** managed.restartAttempt, BACKOFF_CAP_MS);
-    managed.restartAttempt += 1;
+    const next = nextUpstreamFailure(
+      {
+        failures: managed.failures,
+        restartAttempt: managed.restartAttempt,
+        now: Date.now(),
+      },
+      this.timing,
+    );
+    managed.failures = next.failures;
+    managed.restartAttempt = next.restartAttempt;
+    managed.status = next.status;
+    if (next.delayMs === undefined) return;
     if (managed.restartTimer) clearTimeout(managed.restartTimer);
     managed.restartTimer = setTimeout(() => {
       managed.restartTimer = null;
       void this.spawnAndInit(managed).catch(() => undefined);
-    }, delay);
+    }, next.delayMs);
   }
 
   private onMessage(managed: ManagedUpstream, msg: unknown): void {

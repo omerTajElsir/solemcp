@@ -286,6 +286,45 @@ button, input, select, textarea { font: inherit; color: inherit; }
   margin-top: 2px;
 }
 
+.registry-box {
+  padding: 12px 14px 4px;
+}
+
+.registry-row {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.registry-row .field {
+  flex: 1;
+  margin: 0;
+}
+
+.registry-results {
+  margin: 8px 14px 12px;
+}
+
+.project-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.switch-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 2px 0;
+}
+
+.switch-row .row-subtitle {
+  display: block;
+  margin-top: 2px;
+}
+
 .catalog-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redact } from "./redact.ts";
+import { redact, redactForLog } from "./redact.ts";
 
 describe("redact", () => {
   it("replaces each secret value with [redacted]", () => {
@@ -45,5 +45,13 @@ describe("redact", () => {
     expect(redact("see https://user:pass@example.com/path", [])).toBe(
       "see https://[redacted]@example.com/path",
     );
+  });
+
+  it("redacts credential-shaped tokens even when they are not in the secret list", () => {
+    const text = "result ghp_abcdefghijklmnopqrstuvwxyz and Bearer abcdefghijklmnop";
+    const out = redactForLog(text, []);
+    expect(out).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
+    expect(out).not.toContain("abcdefghijklmnop");
+    expect(out).toContain("[redacted]");
   });
 });

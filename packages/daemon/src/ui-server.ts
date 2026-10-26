@@ -23,6 +23,14 @@ export type UiServerHandlers = {
   catalog: () => unknown | Promise<unknown>;
   catalogInstall: (body: Record<string, unknown>) => Promise<unknown>;
   catalogOauthStatus: (sessionId: string) => Promise<unknown>;
+  calls: () => unknown | Promise<unknown>;
+  projectUpdate: (
+    projectId: string,
+    patch: { readsOnly?: boolean; searchMode?: boolean },
+  ) => Promise<void>;
+  connectorReconnect: (slug: string) => Promise<void>;
+  registrySearch: (query: string) => Promise<unknown>;
+  registryInstall: (body: Record<string, unknown>) => Promise<unknown>;
 };
 
 export type UiServerHandle = {
@@ -223,6 +231,46 @@ async function handleApi(
   if (req.method === "POST" && url.pathname === "/api/catalog/install") {
     const body = await readJson(req);
     const result = await handlers.catalogInstall(body);
+    json(res, 200, { ok: true, result });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/calls") {
+    json(res, 200, { calls: await handlers.calls() });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/projects/settings") {
+    const body = await readJson(req);
+    const projectId = String(body.projectId ?? "");
+    if (!projectId) {
+      json(res, 400, { error: "projectId is required" });
+      return;
+    }
+    const patch: { readsOnly?: boolean; searchMode?: boolean } = {};
+    if (typeof body.readsOnly === "boolean") patch.readsOnly = body.readsOnly;
+    if (typeof body.searchMode === "boolean") patch.searchMode = body.searchMode;
+    await handlers.projectUpdate(projectId, patch);
+    json(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/connectors/reconnect") {
+    const body = await readJson(req);
+    await handlers.connectorReconnect(String(body.slug ?? ""));
+    json(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/registry/search") {
+    try {
+      json(res, 200, await handlers.registrySearch(url.searchParams.get("q") ?? ""));
+    } catch (err) {
+      json(res, 502, {
+        error: err instanceof Error ? err.message : "The MCP registry is unreachable.",
+      });
+    }
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/registry/install") {
+    const body = await readJson(req);
+    const result = await handlers.registryInstall(body);
     json(res, 200, { ok: true, result });
     return;
   }

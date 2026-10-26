@@ -36,8 +36,11 @@ const connectorCommon = {
   secretRefs: z.array(z.string()),
   origin: connectorOriginSchema,
   quarantine: quarantineSchema,
-  /** Catalog service id, when this connector came from the ready-made list. */
-  catalogId: z.string().min(1).max(64).optional(),
+  /**
+   * Catalog service id, or an official MCP registry server name.
+   * Registry names include a slash and can be longer than a slug.
+   */
+  catalogId: z.string().min(1).max(200).optional(),
   /** Person-facing name for this login, such as "Work". */
   accountLabel: z.string().min(1).max(40).optional(),
 };
@@ -81,6 +84,16 @@ const projectSchema = z.strictObject({
   paths: z.array(z.string()),
   adopted: z.boolean(),
   assignments: z.array(assignmentSchema),
+  /**
+   * Omitted or false keeps the full approved tool list.
+   * True hides writes until they are named in an allow policy.
+   */
+  readsOnly: z.boolean().optional(),
+  /**
+   * Omitted or false advertises every approved tool.
+   * True advertises only solemcp__status, solemcp__search, and solemcp__call.
+   */
+  searchMode: z.boolean().optional(),
 });
 
 const clientsSchema = z.strictObject({

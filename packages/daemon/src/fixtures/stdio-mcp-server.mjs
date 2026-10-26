@@ -17,6 +17,28 @@ const TOOLS = [
   },
 ];
 
+if (process.env.SOLEMCP_FIXTURE_TOOLS === "annotated") {
+  TOOLS.push(
+    {
+      name: "read_item",
+      description: "Read an item",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "delete_item",
+      description: "Delete an item",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { destructiveHint: true },
+    },
+    {
+      name: "mutate_item",
+      description: "Change an item",
+      inputSchema: { type: "object", properties: {} },
+    },
+  );
+}
+
 const rl = createInterface({ input: process.stdin });
 
 function send(msg) {
@@ -61,11 +83,20 @@ rl.on("line", (line) => {
     const name = msg.params?.name;
     const args = msg.params?.arguments ?? {};
     if (name === "echo") {
+      const message = String(args.message ?? "");
+      if (message.startsWith("ERROR:")) {
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32000, message },
+        });
+        return;
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,
         result: {
-          content: [{ type: "text", text: String(args.message ?? "") }],
+          content: [{ type: "text", text: message }],
         },
       });
       return;

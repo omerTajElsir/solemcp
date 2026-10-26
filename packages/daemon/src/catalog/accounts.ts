@@ -11,9 +11,7 @@ export function catalogServiceOf(
   connector: ServiceIdentity,
   catalogIds: readonly string[],
 ): string | null {
-  if (connector.catalogId && catalogIds.includes(connector.catalogId)) {
-    return connector.catalogId;
-  }
+  if (connector.catalogId) return connector.catalogId;
   const ids = [...catalogIds].sort((a, b) => b.length - a.length);
   for (const id of ids) {
     if (connector.slug === id || connector.slug.startsWith(`${id}-`)) return id;

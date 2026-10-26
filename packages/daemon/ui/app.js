@@ -20,13 +20,14 @@ const PAGE = {
   },
   status: {
     title: "Status",
-    lede: "Health of SoleMCP on this Mac, plus recent changes.",
+    lede: "Health of SoleMCP on this Mac, recent calls, and what is stopped.",
   },
 };
 
 /** @type {{ tab: string, fingerprint: string }} */
 const uiState = { tab: "home", fingerprint: "" };
-const snapshot = { projects: [], connectors: [], catalog: [] };
+const snapshot = { projects: [], connectors: [], catalog: [], calls: [] };
+const registryUi = { query: "", servers: [], error: "", loading: false };
 const linkState = { projectId: null, serviceId: null, lockProject: false };
 
 function setPage(tab) {
@@ -93,7 +94,8 @@ function connectionLabel(status) {
   if (!status || status === "—") return "Not checked yet";
   if (status === "running" || status === "ok" || status === "connected") return "Ready";
   if (status === "stopped" || status === "idle") return "Idle";
-  if (String(status).includes("fail")) return "Couldn’t start";
+  if (status === "failed") return "Failed";
+  if (String(status).includes("fail")) return "Failed";
   return String(status);
 }
 
@@ -101,7 +103,7 @@ function connectionLabel(status) {
 function humanIssue(raw) {
   const s = String(raw);
   const m = s.match(/^connector\s+(\S+):\s*upstream marked failed/i);
-  if (m) return `${m[1]} couldn’t start. Open Tools, confirm it’s allowed, then try again.`;
+  if (m) return `${m[1]} is Failed and stays stopped until you reconnect it.`;
   if (/quarantine|pending/i.test(s)) return s.replace(/quarantine/gi, "approval");
   return s
     .replace(/\bconnector\b/gi, "tool")
@@ -223,7 +225,7 @@ function setupProgress(clients, connectors, projects) {
 }
 
 async function refresh({ force = false } = {}) {
-  const [status, projects, connectors, doctor, activity, clients, catalog] = await Promise.all([
+  const [status, projects, connectors, doctor, activity, clients, catalog, calls] = await Promise.all([
     api("/api/status"),
     api("/api/projects"),
     api("/api/connectors"),
@@ -231,6 +233,7 @@ async function refresh({ force = false } = {}) {
     api("/api/activity"),
     api("/api/clients"),
     api("/api/catalog"),
+    api("/api/calls"),
   ]);
 
   const payload = { status, projects, connectors, doctor, activity, clients, catalog };
@@ -242,11 +245,14 @@ async function refresh({ force = false } = {}) {
     clients: clients.clients,
     catalog: catalog.entries,
     status: status.version,
+    calls: calls.calls,
+    failures: status.failures,
   });
 
   snapshot.projects = projects.projects ?? [];
   snapshot.connectors = connectors.connectors ?? [];
   snapshot.catalog = catalog.entries ?? [];
+  snapshot.calls = calls.calls ?? [];
 
   const list = connectors.connectors ?? [];
   const pending = list.filter((c) => c.quarantine?.state !== "approved").length;
@@ -276,7 +282,7 @@ async function refresh({ force = false } = {}) {
   renderApps(clients);
   renderTools(list, catalog.entries ?? []);
   renderProjects(projects.projects ?? []);
-  renderStatus(doctor, activity.events ?? [], status);
+  renderStatus(doctor, activity.events ?? [], status, snapshot.calls);
   applyPageActions(uiState.tab, payload);
 }
 
@@ -671,6 +677,56 @@ function renderLink() {
   body.append(back);
 }
 
+function projectSwitches(project) {
+  const box = el(`<div class="project-switches"></div>`);
+  box.append(projectSwitch(project, "readsOnly", "Reads only", "Read tools run. Writes stay hidden until you name them."));
+  box.append(projectSwitch(project, "searchMode", "Search mode", "Advertise search and call instead of the full tool list."));
+  return box;
+}
+
+function projectSwitch(project, key, label, hint) {
+  const on = project[key] === true;
+  const row = el(`<label class="switch-row">
+    <span>
+      <span class="row-title">${esc(label)}</span>
+      <span class="row-subtitle">${esc(hint)}</span>
+    </span>
+    <input type="checkbox" ${on ? "checked" : ""} />
+  </label>`);
+  row.querySelector("input").addEventListener("change", async (ev) => {
+    const input = ev.target;
+    input.disabled = true;
+    try {
+      await api("/api/projects/settings", {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id, [key]: input.checked }),
+      });
+      toast(`${label} ${input.checked ? "on" : "off"}`);
+      await refresh({ force: true });
+    } catch (err) {
+      input.checked = !input.checked;
+      toast(err instanceof Error ? err.message : String(err), "bad");
+      input.disabled = false;
+    }
+  });
+  return row;
+}
+
+async function reconnectConnector(slug, button) {
+  button.disabled = true;
+  try {
+    await api("/api/connectors/reconnect", {
+      method: "POST",
+      body: JSON.stringify({ slug }),
+    });
+    toast(`Reconnected ${slug}`);
+    await refresh({ force: true });
+  } catch (err) {
+    toast(err instanceof Error ? err.message : String(err), "bad");
+    button.disabled = false;
+  }
+}
+
 function renderProjects(projects) {
   const panel = document.getElementById("panel-projects");
   panel.replaceChildren();
@@ -742,6 +798,7 @@ function renderProjects(projects) {
     const link = el(`<button type="button" class="btn primary">Link account</button>`);
     link.addEventListener("click", () => openLinkDialog(p.id));
     list.append(link);
+    list.append(projectSwitches(p));
     inset.append(row);
   }
   panel.append(group);
@@ -802,6 +859,8 @@ async function startGithubCatalogInstall(entry, ctx) {
 
 function openGithubAuthDialog(entry, needs, ctx) {
   const form = document.getElementById("catalog-form");
+  delete form.dataset.registryName;
+  delete form.dataset.registryVersion;
   form.elements.namedItem("id").value = entry.id;
   rememberLinkContext(ctx);
   document.getElementById("catalog-title").textContent = "Connect GitHub";
@@ -880,6 +939,8 @@ function openCatalogDialog(entry, ctx) {
   }
 
   const form = document.getElementById("catalog-form");
+  delete form.dataset.registryName;
+  delete form.dataset.registryVersion;
   form.elements.namedItem("id").value = entry.id;
   rememberLinkContext(ctx);
   document.getElementById("catalog-title").textContent = `Add ${entry.title}`;
@@ -981,9 +1042,11 @@ function renderTools(connectors, catalogEntries = []) {
 
   const catalogGroup = el(`<div class="group">
     <div class="group-title">Ready-made</div>
+    <div class="registry-search" data-registry></div>
     <div class="catalog-grid" data-catalog></div>
-    <p class="group-footer">Each project can use one account per service. Sign-in details stay in your Mac keychain.</p>
+    <p class="group-footer">Each project can use one account per service. Sign-in details stay in your Mac keychain. Registry results install through the same approval step.</p>
   </div>`);
+  catalogGroup.querySelector("[data-registry]").append(renderRegistrySearch());
   const catalogGrid = catalogGroup.querySelector("[data-catalog]");
   for (const entry of catalogEntries) {
     const count = entry.accountCount ?? (entry.installed ? 1 : 0);
@@ -1022,15 +1085,128 @@ function renderTools(connectors, catalogEntries = []) {
             <div class="row-title">${esc(connectorHeading(c))}</div>
             <div class="row-subtitle">${esc(projectsUsing(c.id) || "Not linked to a project")} · ${esc(connectionLabel(c.upstreamStatus))}</div>
           </div>
-          <div class="row-trailing"><span class="pill ok">Allowed</span></div>
+          <div class="row-trailing" data-trail></div>
         </div>`),
       );
+      const trail = inset.lastElementChild.querySelector("[data-trail]");
+      if (c.upstreamStatus === "failed") {
+        trail.append(el(`<span class="pill warn">Failed</span>`));
+        const again = el(`<button type="button" class="btn">Reconnect</button>`);
+        again.addEventListener("click", () => reconnectConnector(c.slug, again));
+        trail.append(again);
+      } else {
+        trail.append(el(`<span class="pill ok">Allowed</span>`));
+      }
     }
   }
   panel.append(group);
 }
 
-function renderStatus(doctor, events, status) {
+function renderRegistrySearch() {
+  const wrap = el(`<div class="registry-box"></div>`);
+  const field = el(`<label class="field">Search the MCP registry
+    <input type="search" placeholder="filesystem, github, sqlite…" value="${esc(registryUi.query)}" />
+  </label>`);
+  const input = field.querySelector("input");
+  const go = el(`<button type="button" class="btn">Search</button>`);
+  const row = el(`<div class="registry-row"></div>`);
+  row.append(field, go);
+  wrap.append(row);
+  go.addEventListener("click", () => runRegistrySearch(input, go));
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      runRegistrySearch(input, go);
+    }
+  });
+  if (registryUi.loading) {
+    wrap.append(el(`<p class="group-footer">Searching the official registry…</p>`));
+  }
+  if (registryUi.error) {
+    wrap.append(el(`<p class="err">${esc(registryUi.error)}</p>`));
+  }
+  if (registryUi.servers.length) {
+    const list = el(`<div class="inset registry-results"></div>`);
+    for (const server of registryUi.servers) {
+      const item = el(`<div class="row">
+        <div class="row-main">
+          <div class="row-title">${esc(server.title || server.name)}</div>
+          <div class="row-subtitle">${esc(server.description || server.name)}</div>
+        </div>
+        <div class="row-trailing"><button type="button" class="btn primary">Install</button></div>
+      </div>`);
+      item.querySelector("button").addEventListener("click", () => installRegistryServer(server));
+      list.append(item);
+    }
+    wrap.append(list);
+  }
+  return wrap;
+}
+
+async function runRegistrySearch(input, button) {
+  registryUi.query = input.value.trim();
+  registryUi.loading = true;
+  registryUi.error = "";
+  button.disabled = true;
+  renderTools(snapshot.connectors, snapshot.catalog);
+  try {
+    const result = await api(`/api/registry/search?q=${encodeURIComponent(registryUi.query)}`);
+    registryUi.servers = result.servers ?? [];
+    registryUi.error = "";
+    if (!registryUi.servers.length) registryUi.error = "No registry servers matched that search.";
+  } catch (err) {
+    registryUi.servers = [];
+    registryUi.error = err instanceof Error ? err.message : "The MCP registry is unreachable. Ready-made tools still work.";
+  } finally {
+    registryUi.loading = false;
+    button.disabled = false;
+    renderTools(snapshot.connectors, snapshot.catalog);
+  }
+}
+
+async function installRegistryServer(server) {
+  try {
+    const res = await api("/api/registry/install", {
+      method: "POST",
+      body: JSON.stringify({ name: server.name, version: server.version }),
+    });
+    const result = res.result ?? {};
+    if (result.status === "needs_env") {
+      openRegistryEnvDialog(server, result);
+      return;
+    }
+    toast(`${result.title || server.title || server.name} added. Allow it on Tools before it can run.`);
+    registryUi.servers = [];
+    registryUi.query = "";
+    await refresh({ force: true });
+  } catch (err) {
+    registryUi.error = err instanceof Error ? err.message : String(err);
+    toast(registryUi.error, "bad");
+    renderTools(snapshot.connectors, snapshot.catalog);
+  }
+}
+
+function openRegistryEnvDialog(server, plan) {
+  const form = document.getElementById("catalog-form");
+  form.elements.namedItem("id").value = "";
+  document.getElementById("catalog-title").textContent = plan.title || server.title || server.name;
+  document.getElementById("catalog-summary").textContent =
+    "These values are saved in your keychain. The server stays quarantined until you allow it.";
+  const fields = document.getElementById("catalog-fields");
+  fields.replaceChildren();
+  for (const variable of plan.variables ?? []) {
+    if (!variable.required && !variable.secret) continue;
+    fields.append(el(`<label class="field">${esc(variable.name)}
+      <input name="secret:${esc(variable.name)}" type="${variable.secret ? "password" : "text"}" autocomplete="off" ${variable.required || variable.secret ? "required" : ""} />
+      <span class="group-footer">${esc(variable.description || "")}</span>
+    </label>`));
+  }
+  form.dataset.registryName = server.name;
+  form.dataset.registryVersion = server.version || "";
+  document.getElementById("catalog-dialog").showModal();
+}
+
+function renderStatus(doctor, events, status, calls = []) {
   const panel = document.getElementById("panel-status");
   panel.replaceChildren();
 
@@ -1088,6 +1264,56 @@ function renderStatus(doctor, events, status) {
     inset.append(ul);
   }
   panel.append(hist);
+
+  const failed = status.failures ?? [];
+  if (failed.length) {
+    const group = el(`<div class="group">
+      <div class="group-title">Stopped</div>
+      <div class="inset" data-failed></div>
+      <p class="group-footer">Failed stays down until you reconnect. It does not start itself.</p>
+    </div>`);
+    const inset = group.querySelector("[data-failed]");
+    for (const item of failed) {
+      const row = el(`<div class="row">
+        <div class="row-main">
+          <div class="row-title">${esc(item.slug)}</div>
+          <div class="row-subtitle">Failed</div>
+        </div>
+        <div class="row-trailing"></div>
+      </div>`);
+      const again = el(`<button type="button" class="btn primary">Reconnect</button>`);
+      again.addEventListener("click", () => reconnectConnector(item.slug, again));
+      row.querySelector(".row-trailing").append(again);
+      inset.append(row);
+    }
+    panel.append(group);
+  }
+
+  const callsGroup = el(`<div class="group">
+    <div class="group-title">Recent calls</div>
+    <div class="inset" data-calls></div>
+    <p class="group-footer">Project, tool, outcome, and duration. Arguments are not stored.</p>
+  </div>`);
+  const callsInset = callsGroup.querySelector("[data-calls]");
+  if (!calls.length) {
+    callsInset.append(el(`<div class="empty" style="padding:18px 14px"><p>No calls yet.</p></div>`));
+  } else {
+    for (const call of calls) {
+      const when = call.at
+        ? new Date(call.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+        : "—";
+      const project = snapshot.projects.find((p) => p.id === call.projectId);
+      const projectName = project ? projectLabel(project) : call.projectId || "—";
+      callsInset.append(el(`<div class="row">
+        <div class="row-main">
+          <div class="row-title">${esc(call.tool)}</div>
+          <div class="row-subtitle">${esc(projectName)} · ${esc(when)} · ${esc(String(call.durationMs))} ms</div>
+        </div>
+        <div class="row-trailing"><span class="pill ${call.ok ? "ok" : "warn"}">${call.ok ? "Ok" : "Fail"}</span></div>
+      </div>`));
+    }
+  }
+  panel.append(callsGroup);
 }
 
 document.querySelectorAll(".sidebar-nav button").forEach((btn) => {
@@ -1178,6 +1404,35 @@ catalogForm.addEventListener("submit", async (ev) => {
     if (key.startsWith("secret:") && String(value).trim()) {
       secrets[key.slice("secret:".length)] = String(value);
     }
+  }
+  const registryName = catalogForm.dataset.registryName || "";
+  if (registryName) {
+    try {
+      const res = await api("/api/registry/install", {
+        method: "POST",
+        body: JSON.stringify({
+          name: registryName,
+          version: catalogForm.dataset.registryVersion || undefined,
+          secrets,
+          projectId: String(fd.get("projectId") ?? "").trim() || undefined,
+          accountLabel: String(fd.get("accountLabel") ?? "").trim() || undefined,
+        }),
+      });
+      document.getElementById("catalog-dialog").close();
+      catalogForm.reset();
+      delete catalogForm.dataset.registryName;
+      delete catalogForm.dataset.registryVersion;
+      const result = res.result ?? {};
+      if (result.status === "needs_env") {
+        toast("A required value is still missing", "bad");
+        return;
+      }
+      toast(`${result.title || registryName} added. Allow it on Tools before it can run.`);
+      await refresh({ force: true });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), "bad");
+    }
+    return;
   }
   const body = { id, secrets };
   const path = String(fd.get("path") ?? "").trim();

@@ -10,6 +10,9 @@ export const SOCKET_NAME = "daemon.sock";
 export const LOG_DIR = "logs";
 export const RESERVED_SLUG = "solemcp";
 export const STATUS_TOOL = "solemcp__status";
+export const SEARCH_TOOL = "solemcp__search";
+export const CALL_TOOL = "solemcp__call";
+export const CALL_LOG_FILE = "calls.json";
 export const NAMESPACE_SEPARATOR = "__";
 export const KEYCHAIN_SERVICE = "solemcp";
 export const DAEMON_TOKEN_ACCOUNT = "daemon-token";
@@ -93,7 +96,16 @@ export type ControlRequest =
   | { id: string; method: "startUi" }
   | { id: string; method: "stopUi" }
   | { id: string; method: "listConnectors" }
-  | { id: string; method: "activity" };
+  | { id: string; method: "activity" }
+  | {
+      id: string;
+      method: "projectUpdate";
+      projectId: string;
+      readsOnly?: boolean;
+      searchMode?: boolean;
+    }
+  | { id: string; method: "connectorReconnect"; slug: string }
+  | { id: string; method: "calls" };
 
 export interface ControlResponse {
   id: string;
@@ -123,6 +135,9 @@ const CONTROL_METHODS = new Set<ControlRequest["method"]>([
   "stopUi",
   "listConnectors",
   "activity",
+  "projectUpdate",
+  "connectorReconnect",
+  "calls",
 ]);
 
 export function parseHello(value: unknown): HelloMessage {

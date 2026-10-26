@@ -1,10 +1,16 @@
 import type { Connector, Quarantine, QuarantineTool } from "@solemcp/schema";
 import { inputSchemaHash } from "./hash.ts";
 
+export type ToolAnnotations = {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+};
+
 export type ListedTool = {
   name: string;
   description: string;
   inputSchema: unknown;
+  annotations?: ToolAnnotations;
 };
 
 /**

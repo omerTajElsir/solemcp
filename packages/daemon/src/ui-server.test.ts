@@ -31,6 +31,11 @@ describe("loopback UI server", () => {
         catalog: () => ({ entries: [] }),
         catalogInstall: async () => ({ slug: "x" }),
         catalogOauthStatus: async () => ({ status: "complete" }),
+        calls: () => [],
+        projectUpdate: async () => undefined,
+        connectorReconnect: async () => undefined,
+        registrySearch: async () => ({ servers: [] }),
+        registryInstall: async () => ({ status: "complete" }),
       },
     });
 

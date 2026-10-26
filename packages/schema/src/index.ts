@@ -21,5 +21,6 @@ export type {
   Tombstone,
   ToolPolicy,
 } from "./config.ts";
+export { SLUG_PATTERN, slugSchema } from "./slug.ts";
 export { parseProjectFile } from "./project-file.ts";
 export type { ProjectFile } from "./project-file.ts";

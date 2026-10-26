@@ -6,14 +6,18 @@ import {
   applyToolList,
   commandHash,
   evaluatePolicy,
+  filterReadsOnly,
   inputSchemaHash,
   namespaceTool,
   redact,
+  searchTools,
   visibleTools,
   type ListedTool,
 } from "@solemcp/core";
 import {
   BACKUP_DIR,
+  CALL_LOG_FILE,
+  CALL_TOOL,
   createFrameDecoder,
   DAEMON_TOKEN_ACCOUNT,
   encodeFrame,
@@ -22,6 +26,7 @@ import {
   parseHello,
   RESERVED_SLUG,
   RUN_DIR,
+  SEARCH_TOOL,
   STATUS_TOOL,
   socketPath,
   solemcpHome,
@@ -40,7 +45,7 @@ import { ConfigStore } from "./config-store.ts";
 import { HttpUpstreamManager } from "./http.ts";
 import type { Keychain } from "./keychain.ts";
 import { assertPeerAllowed, defaultPeerCheck, type PeerCheck } from "./peer.ts";
-import { UpstreamManager } from "./upstream.ts";
+import { UpstreamManager, type UpstreamTiming } from "./upstream.ts";
 import { startUiServer, type UiActivityEvent, type UiServerHandle } from "./ui-server.ts";
 import {
   buildClientConnectGuide,
@@ -56,6 +61,13 @@ import {
   runGhWebLogin,
 } from "./catalog/github-auth.ts";
 import { OAuthInstallManager } from "./oauth/install-session.ts";
+import { CallLog } from "./call-log.ts";
+import {
+  installRegistryServer,
+  RegistryError,
+  searchOfficialRegistry,
+  type RegistryInstallRequest,
+} from "./registry.ts";
 
 const RUN_MODE = 0o700;
 const SOCKET_MODE = 0o600;
@@ -68,6 +80,8 @@ export type DaemonOptions = {
   version?: string;
   /** Override static UI root (tests). */
   uiRoot?: string;
+  /** Override crash backoff. Production keeps the 1s/2s/4s, cap 30s, 5-in-5-minutes policy. */
+  upstreamTiming?: Partial<UpstreamTiming>;
 };
 
 export type DaemonHandle = {
@@ -98,7 +112,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   }
 
   let config = await store.read();
-  const upstreams = new UpstreamManager(opts.keychain);
+  const upstreams = new UpstreamManager(opts.keychain, opts.upstreamTiming);
   const httpUpstreams = new HttpUpstreamManager(opts.keychain);
   const sock = socketPath(opts.home);
 
@@ -112,6 +126,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const sockets = new Set<Socket>();
   let ui: UiServerHandle | null = null;
   const activity: UiActivityEvent[] = [];
+  const callLog = new CallLog(join(root, LOG_DIR, CALL_LOG_FILE));
+  await callLog.load();
   const oauthInstalls = new OAuthInstallManager(opts.keychain);
 
   function noteActivity(message: string): void {
@@ -147,6 +163,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     root: string;
     project: Project | null;
     adopted: boolean;
+  };
+
+  type AdvertisedTool = {
+    name: string;
+    description: string;
+    inputSchema: unknown;
+    upstreamName: string;
+    slug: string;
   };
 
   async function reloadConfig(): Promise<void> {
@@ -343,12 +367,20 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       const params = isRecord(value.params) ? value.params : {};
       const name = typeof params.name === "string" ? params.name : "";
       const args = params.arguments;
-      const result = await callSessionTool(session, name, args);
-      writeFrame(socket, {
-        jsonrpc: "2.0",
-        id,
-        result,
-      });
+      const started = Date.now();
+      try {
+        const result = await callSessionTool(session, name, args);
+        await recordCall(session, name, true, Date.now() - started, undefined, result);
+        writeFrame(socket, {
+          jsonrpc: "2.0",
+          id,
+          result,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "tool call failed";
+        await recordCall(session, name, false, Date.now() - started, message, undefined);
+        throw err;
+      }
       return;
     }
 
@@ -364,21 +396,64 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     });
   }
 
+  const statusTool = {
+    name: STATUS_TOOL,
+    description: "SoleMCP session status",
+    inputSchema: { type: "object", properties: {} },
+  };
+
+  const searchTool = {
+    name: SEARCH_TOOL,
+    description:
+      "Search this project's approved tools by name or description. Returns names and descriptions only.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+    },
+  };
+
+  const callTool = {
+    name: CALL_TOOL,
+    description: "Call one approved tool by its namespaced name. Does not execute code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        arguments: { type: "object" },
+      },
+      required: ["name"],
+    },
+  };
+
   async function listSessionTools(session: SessionView): Promise<
     Array<{ name: string; description: string; inputSchema: unknown }>
   > {
-    const statusTool = {
-      name: STATUS_TOOL,
-      description: "SoleMCP session status",
-      inputSchema: { type: "object", properties: {} },
-    };
     if (!session.adopted || !session.project) {
       return [statusTool];
     }
+    if (session.project.searchMode === true) {
+      return [statusTool, searchTool, callTool];
+    }
+    const approved = await approvedSessionTools(session);
+    return [statusTool, ...approved.map(advertise)];
+  }
 
-    const out: Array<{ name: string; description: string; inputSchema: unknown }> = [
-      statusTool,
-    ];
+  function advertise(tool: AdvertisedTool): {
+    name: string;
+    description: string;
+    inputSchema: unknown;
+  } {
+    return {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    };
+  }
+
+  async function approvedSessionTools(session: SessionView): Promise<AdvertisedTool[]> {
+    if (!session.project) return [];
+    const readsOnly = session.project.readsOnly === true;
+    const out: AdvertisedTool[] = [];
     for (const assignment of session.project.assignments) {
       const connector = config.connectors.find((c) => c.id === assignment.connectorId);
       if (!connector || connector.quarantine.state !== "approved") continue;
@@ -402,12 +477,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
         assignment.toolPolicy,
       );
       const allowed = new Set(policy.names);
-      for (const tool of approved) {
-        if (!allowed.has(tool.name)) continue;
+      const gated = filterReadsOnly(
+        approved.filter((tool) => allowed.has(tool.name)),
+        assignment.toolPolicy,
+        readsOnly,
+      );
+      for (const tool of gated) {
         out.push({
           name: namespaceTool(live.slug, tool.name),
           description: tool.description,
           inputSchema: tool.inputSchema,
+          upstreamName: tool.name,
+          slug: live.slug,
         });
       }
     }
@@ -418,6 +499,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     session: SessionView,
     name: string,
     args: unknown,
+    viaSearch = false,
   ): Promise<unknown> {
     if (name === STATUS_TOOL) {
       return {
@@ -434,36 +516,60 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       throw new Error("project not adopted");
     }
 
-    const sep = "__";
-    const idx = name.indexOf(sep);
-    if (idx <= 0) throw new Error(`unknown tool ${name}`);
-    const slug = name.slice(0, idx);
-    const upstreamName = name.slice(idx + sep.length);
-
-    const connector = config.connectors.find((c) => c.slug === slug);
-    if (!connector) {
-      throw new Error(`unknown tool ${name}`);
+    if (session.project.searchMode === true && !viaSearch) {
+      if (name === SEARCH_TOOL) {
+        const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
+        const hits = searchTools(await approvedSessionTools(session), query);
+        return {
+          content: [{ type: "text", text: JSON.stringify(hits) }],
+        };
+      }
+      if (name === CALL_TOOL) {
+        const record = isRecord(args) ? args : {};
+        const inner = typeof record.name === "string" ? record.name : "";
+        if (!inner || inner === CALL_TOOL || inner === SEARCH_TOOL) {
+          throw new Error("solemcp__call requires a namespaced tool name");
+        }
+        return callSessionTool(session, inner, record.arguments, true);
+      }
+      throw new Error(`tool not advertised in search mode: ${name}`);
     }
-    const assignment = session.project.assignments.find((a) => a.connectorId === connector.id);
-    if (!assignment) throw new Error(`tool not assigned: ${name}`);
 
-    const listed =
-      connector.transport === "stdio"
-        ? await upstreams.listTools(connector)
-        : await httpUpstreams.listTools(connector);
-    const approved = visibleTools(connector, listed);
-    const policy = evaluatePolicy(
-      approved.map((t) => t.name),
-      assignment.toolPolicy,
-    );
-    if (!policy.names.includes(upstreamName)) {
+    if (session.project.searchMode === true && viaSearch && (name === CALL_TOOL || name === SEARCH_TOOL)) {
       throw new Error(`tool not allowed: ${name}`);
     }
 
+    const allowed = await approvedSessionTools(session);
+    const match = allowed.find((tool) => tool.name === name);
+    if (!match) throw new Error(`tool not allowed: ${name}`);
+
+    const connector = config.connectors.find((c) => c.slug === match.slug);
+    if (!connector) throw new Error(`unknown tool ${name}`);
+
     if (connector.transport === "stdio") {
-      return upstreams.callTool(connector, upstreamName, args);
+      return upstreams.callTool(connector, match.upstreamName, args);
     }
-    return httpUpstreams.callTool(connector, upstreamName, args);
+    return httpUpstreams.callTool(connector, match.upstreamName, args);
+  }
+
+  async function recordCall(
+    session: SessionView,
+    tool: string,
+    ok: boolean,
+    durationMs: number,
+    errorText: string | undefined,
+    result: unknown,
+  ): Promise<void> {
+    const secretValues = await collectSecretValues();
+    await callLog.record({
+      projectId: session.project?.id ?? null,
+      tool,
+      ok,
+      durationMs,
+      errorText,
+      resultText: result === undefined ? undefined : safeJson(result),
+      secretValues,
+    });
   }
 
   function listConnectorViews(): Array<Record<string, unknown>> {
@@ -505,6 +611,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       root: session?.root ?? null,
       connectors: assignedSlugs,
       quarantinePending: pending,
+      readsOnly: session?.project?.readsOnly === true,
+      searchMode: session?.project?.searchMode === true,
       upstreams: config.connectors.map((c) => ({
         slug: c.slug,
         status:
@@ -512,7 +620,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
             ? upstreams.getStatus(c.id)
             : httpUpstreams.getStatus(c.id),
       })),
+      failures: config.connectors
+        .filter((c) => upstreamStatus(c) === "failed")
+        .map((c) => ({ slug: c.slug, status: "failed" as const })),
     };
+  }
+
+  function upstreamStatus(c: Config["connectors"][number]): string {
+    return c.transport === "stdio" ? upstreams.getStatus(c.id) : httpUpstreams.getStatus(c.id);
   }
 
   async function handleControl(req: ControlRequest): Promise<ControlResponse> {
@@ -561,6 +676,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
           };
         case "activity":
           return { id: req.id, ok: true, result: { events: activity } };
+        case "calls":
+          return { id: req.id, ok: true, result: { calls: callLog.recent() } };
+        case "projectUpdate":
+          await projectUpdate(req);
+          noteActivity(
+            `updated project ${req.projectId} (reads-only ${req.readsOnly === true ? "on" : req.readsOnly === false ? "off" : "unchanged"}, search ${req.searchMode === true ? "on" : req.searchMode === false ? "off" : "unchanged"})`,
+          );
+          return { id: req.id, ok: true, result: { updated: req.projectId } };
+        case "connectorReconnect": {
+          await connectorReconnect(req.slug);
+          noteActivity(`reconnected ${req.slug}`);
+          return { id: req.id, ok: true, result: { reconnected: req.slug } };
+        }
         case "startUi": {
           if (!ui) {
             ui = await startUiServer({
@@ -819,6 +947,88 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
                   const status = oauthInstalls.getStatus(sessionId);
                   if (!status) throw new Error("unknown OAuth session");
                   return status;
+                },
+                calls: () => callLog.recent(),
+                projectUpdate: async (projectId, patch) => {
+                  await projectUpdate({
+                    id: "ui",
+                    method: "projectUpdate",
+                    projectId,
+                    ...patch,
+                  });
+                },
+                connectorReconnect: async (slug) => {
+                  await connectorReconnect(slug);
+                  noteActivity(`reconnected ${slug}`);
+                },
+                registrySearch: async (query) => searchOfficialRegistry(query),
+                registryInstall: async (body) => {
+                  const request: RegistryInstallRequest = {
+                    name: String(body.name ?? ""),
+                    version: typeof body.version === "string" ? body.version : undefined,
+                    secrets:
+                      body.secrets && typeof body.secrets === "object" && !Array.isArray(body.secrets)
+                        ? Object.fromEntries(
+                            Object.entries(body.secrets as Record<string, unknown>).map(([k, v]) => [
+                              k,
+                              String(v),
+                            ]),
+                          )
+                        : undefined,
+                  };
+                  let planned;
+                  try {
+                    planned = await installRegistryServer(request);
+                  } catch (err) {
+                    if (err instanceof RegistryError) throw err;
+                    throw err;
+                  }
+                  if (planned.status === "needs_env") return planned;
+                  const projectId =
+                    typeof body.projectId === "string" && body.projectId.length > 0
+                      ? body.projectId
+                      : undefined;
+                  const accountLabel =
+                    typeof body.accountLabel === "string" ? body.accountLabel : undefined;
+                  assertProjectAcceptsService(projectId, planned.catalogId);
+                  const catalogIds = [
+                    ...POPULAR_CATALOG.map((item) => item.id),
+                    planned.catalogId,
+                  ];
+                  const instance = planAccountInstance({
+                    baseSlug: planned.slugBase,
+                    takenSlugs: config.connectors.map((c) => c.slug),
+                    existingAccounts: config.connectors.filter(
+                      (c) => catalogServiceOf(c, catalogIds) === planned.catalogId,
+                    ).length,
+                    accountLabel,
+                  });
+                  for (const [ref, value] of Object.entries(planned.secrets)) {
+                    if (value) await opts.keychain.set(ref, value);
+                  }
+                  const result = await connectorAdd({
+                    id: "ui",
+                    method: "connectorAdd",
+                    slug: instance.slug,
+                    transport: planned.transport,
+                    argv: planned.argv,
+                    url: planned.url,
+                    sseFallback: planned.sseFallback,
+                    secretRefs: planned.secretRefs,
+                    headerRefs: planned.headerRefs,
+                    catalogId: planned.catalogId,
+                    ...(instance.accountLabel ? { accountLabel: instance.accountLabel } : {}),
+                  });
+                  if (projectId) {
+                    await connectorAssign({
+                      id: "ui",
+                      method: "connectorAssign",
+                      slug: result.slug,
+                      projectId,
+                    });
+                  }
+                  noteActivity(`registry: added ${result.slug} (quarantined)`);
+                  return { status: "complete" as const, ...result, title: planned.title };
                 },
               },
             });
@@ -1112,6 +1322,44 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     return { assigned: true };
   }
 
+  async function projectUpdate(
+    req: Extract<ControlRequest, { method: "projectUpdate" }>,
+  ): Promise<void> {
+    config = await store.update((cfg) => {
+      const project = cfg.projects.find((p) => p.id === req.projectId);
+      if (!project) throw new Error(`unknown project ${req.projectId}`);
+      return {
+        ...cfg,
+        projects: cfg.projects.map((p) => {
+          if (p.id !== project.id) return p;
+          const next = { ...p };
+          if (typeof req.readsOnly === "boolean") {
+            if (req.readsOnly) next.readsOnly = true;
+            else delete next.readsOnly;
+          }
+          if (typeof req.searchMode === "boolean") {
+            if (req.searchMode) next.searchMode = true;
+            else delete next.searchMode;
+          }
+          return next;
+        }),
+      };
+    });
+  }
+
+  async function connectorReconnect(slug: string): Promise<void> {
+    const connector = config.connectors.find((c) => c.slug === slug);
+    if (!connector) throw new Error(`unknown connector ${slug}`);
+    if (connector.quarantine.state !== "approved") {
+      throw new Error(`connector ${slug} is not approved`);
+    }
+    if (connector.transport === "stdio") {
+      await upstreams.reconnect(connector);
+      return;
+    }
+    await httpUpstreams.reconnect(connector);
+  }
+
   async function connectorUnassign(
     req: Extract<ControlRequest, { method: "connectorUnassign" }>,
   ): Promise<{ unassigned: true }> {
@@ -1198,6 +1446,14 @@ function httpConnectorsToRun(config: Config): HttpConnector[] {
       c.quarantine.state === "approved" &&
       assigned.has(c.id),
   );
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
 }
 
 function writeResponse(socket: Socket, response: ControlResponse): void {
