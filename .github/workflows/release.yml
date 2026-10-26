@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm build
+      - name: Package macOS tarball
+        env:
+          SOLEMCP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0' }}
+        run: node scripts/package-macos.mjs
+      - name: Optional codesign
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: sh scripts/codesign-macos.sh dist/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: |
+            dist/release/*.tar.gz
+            dist/release/SHA256SUMS
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="macOS tarball of the bundle and launcher. Node.js 22 or newer is required. SHA256SUMS is the checksum file. Codesign is skipped unless CSC_LINK is set and a Mach-O binary is present. npm publish is skipped while the package is private or NPM_TOKEN is absent."
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$notes"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/release/*.tar.gz dist/release/SHA256SUMS --clobber
+
+  npm:
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Publish only when the package is public and a token exists
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "npm publish skipped: NPM_TOKEN is not set"
+            exit 0
+          fi
+          private=$(node -p "require('./package.json').private === true")
+          if [ "$private" = "true" ]; then
+            echo "npm publish skipped: package.json private is true"
+            exit 0
+          fi
+          pnpm publish --access public --no-git-checks --provenance
