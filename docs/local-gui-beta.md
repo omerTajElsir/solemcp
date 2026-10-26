@@ -28,12 +28,14 @@ alias solemcp='node /path/to/solemcp/dist/solemcp.mjs'
 ## First run
 
 ```bash
-# Terminal A — or skip; `solemcp ui` will spawn the daemon if needed
-solemcp daemon
+# Keeps the daemon running after you close the terminal.
+solemcp service install
 
-# Terminal B
+# Opens the window. It does not keep the daemon alive.
 solemcp ui
 ```
+
+`solemcp service install` writes `~/Library/LaunchAgents/com.solemcp.daemon.plist`, bootstraps it, and sends logs to `~/.solemcp/logs`. `solemcp service uninstall` removes that agent. If a daemon was already running in a terminal, install stops it first so two processes do not share `~/.solemcp/run/daemon.sock`.
 
 Your browser opens `http://127.0.0.1:<port>/#token=…`. The token is only in the fragment.
 
@@ -42,9 +44,10 @@ Your browser opens `http://127.0.0.1:<port>/#token=…`. The token is only in th
 1. **Connectors → Popular MCPs** — GitHub uses GitHub sign-in. Notion, Linear, GitLab, Jira, Sentry, Vercel, Supabase, Stripe, PostHog, and Cloudflare open a browser sign-in (MCP OAuth). Filesystem asks for a path. Fetch and Playwright need no auth. All start quarantined.
 2. **Custom connector** — stdio argv or HTTPS URL (optional pasted secrets still supported).
 3. **Quarantine** — approve the connector (and tools when schemas change).
-4. **Projects** — adopt a folder, then assign approved connectors.
+4. **Projects** — adopt a folder, then link one account per service. **Reads only** hides writes until you name them. **Search mode** replaces that project's tool list with search and call. Existing projects stay full-tool until you turn either switch on.
 5. **Clients** — Add to Cursor / Claude / Codex.
-6. **Doctor** — missing secret refs and failed upstreams.
+6. **Status** — recent calls (no argument bodies) and a **Reconnect** button for a connector that is Failed. Failed stays down until you reconnect it.
+7. On **Tools**, the search field queries the official MCP registry. The logo grid still works when that search cannot reach the registry.
 
 ### Wire a coding client
 
@@ -79,7 +82,7 @@ Store values in the macOS keychain under service `solemcp`, account = ref name (
 
 ## What this beta is not
 
-- No Homebrew / npm publish / signed installers yet
+- The macOS release tarball still needs Node.js 22. Developer ID signing runs only when `CSC_LINK` is set. npm publish is deferred. See [release.md](release.md) and [name-gate.md](name-gate.md).
 - No cloud dashboard
 - No Windows named-pipe daemon yet
-- Live Cursor JSONC / Codex comment edge cases still follow abort-or-preserve rules
+- Live Cursor JSONC and Codex comment checks are recorded in [client-checks.md](client-checks.md). The Cursor adapter still refuses to write JSONC.
