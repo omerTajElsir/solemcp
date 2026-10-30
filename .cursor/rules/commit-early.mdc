@@ -1,0 +1,34 @@
+---
+description: Commit each logical change as soon as it stands alone so history is clean before a push
+alwaysApply: true
+---
+
+# Commit early
+
+Implementing work in this repo includes committing it. This rule is the standing request to commit. Do not wait for a separate "please commit" message, and do not leave a session as one uncommitted pile.
+
+## When to commit
+
+- Commit as soon as a coherent slice is done: one feature, one fix, one refactor, or the tests that belong with it.
+- Commit that slice before starting the next unrelated change.
+- By the time the user pushes, the branch is already a sequence of those commits.
+
+## What goes in a commit
+
+- One concern. A behavior change and its tests belong together. A drive-by rename or formatting pass is its own commit, or stays out.
+- A message that says why, in one or two sentences. Match recent history: a full sentence, no conventional-commit prefix.
+
+```
+Add account install so the daemon can track which catalog accounts are connected.
+
+Show connected accounts in the local UI.
+```
+
+One commit titled `updates` that mixes the daemon, the UI, and unrelated formatting is the failure mode.
+
+## Safety
+
+- Do not push unless the user asks.
+- Do not commit secrets (`.env`, credentials, tokens). Warn if asked to commit them.
+- Do not update git config, skip hooks, or force-push.
+- Do not amend a commit that was not created in this conversation, or one that is already on the remote. If a hook rejects a commit, fix the cause and make a new commit.
